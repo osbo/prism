@@ -1,0 +1,15 @@
+torch>=2.1.0
+torchvision>=0.16.0
+numpy>=1.24.0
+Pillow>=10.0.0
+lpips>=0.1.4
+trimesh>=4.0.0
+scikit-image>=0.21.0          # marching cubes (skimage.measure.marching_cubes)
+PyMCubes>=0.1.4               # alternative marching cubes
+open3d>=0.18.0                # Chamfer distance, point cloud ops
+wandb>=0.16.0
+tqdm>=4.65.0
+einops>=0.7.0
+# tiny-cuda-nn: install from source on the cluster
+# pip install git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
+tinycudann>=1.7               # if pre-built wheel is available, otherwise use above
