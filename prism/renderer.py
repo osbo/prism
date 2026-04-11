@@ -70,8 +70,10 @@ def _sphere_trace(
         pts = rays_o[active] + t[active].unsqueeze(-1) * rays_d[active]  # (M, 3)
         sdf = sdf_fn(pts).squeeze(-1)                                      # (M,)
 
-        # Advance by the SDF value (Lipschitz sphere step)
-        t[active] = t[active] + sdf.abs()
+        # Advance by the SDF value (Lipschitz sphere step).
+        # Use clamp(min=0): if sdf < 0 (overshoot), don't advance further —
+        # advancing by |sdf| would push deeper into the surface.
+        t[active] = t[active] + sdf.clamp(min=0)
         # Mark converged
         hit[active] = sdf.abs() < eps
 

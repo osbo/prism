@@ -119,8 +119,10 @@ def load_checkpoint(path: Path, model: PRISM, optimizer=None, scaler=None):
 # Validation
 # ---------------------------------------------------------------------------
 
-@torch.no_grad()
 def validate(model, loader, device, rank, cfg):
+    # Cannot use torch.no_grad() here: the renderer calls torch.autograd.grad
+    # internally (IFT surface points, normal computation) which requires the
+    # autograd graph to be alive.  We simply skip .backward() instead.
     model.eval()
     total_loss = 0.0
     n_batches = 0
@@ -181,8 +183,10 @@ def train(cfg: PRISMConfig, resume_from: str | None = None):
 
     optimizer = torch.optim.AdamW(
         [
-            {"params": encoder_params, "lr": cfg.train.lr_encoder},
-            {"params": other_params,   "lr": cfg.train.lr},
+            {"params": encoder_params, "lr": cfg.train.lr_encoder,
+             "initial_lr": cfg.train.lr_encoder},
+            {"params": other_params,   "lr": cfg.train.lr,
+             "initial_lr": cfg.train.lr},
         ],
         weight_decay=cfg.train.weight_decay,
     )
@@ -256,7 +260,7 @@ def train(cfg: PRISMConfig, resume_from: str | None = None):
             # LR update
             scale = get_lr_scale(global_step)
             for pg in optimizer.param_groups:
-                pg["lr"] = pg.get("initial_lr", cfg.train.lr) * scale
+                pg["lr"] = pg["initial_lr"] * scale
 
             image  = batch["image"].to(device, non_blocking=True)
             depth  = batch["depth"].to(device, non_blocking=True)

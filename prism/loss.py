@@ -107,8 +107,9 @@ class PRISMLoss(nn.Module):
         if sdf_pts.shape[0] == 0:
             return sdf_pts.sum() * 0.0
 
-        # Surface points (already have grad via IFT)
-        pts_surface = sdf_pts.requires_grad_(True)
+        # Detach surface points so x is treated as a fixed input — we want
+        # d(eikonal)/dθ via d(||∇_x f||)/dθ, not through the IFT path.
+        pts_surface = sdf_pts.detach().requires_grad_(True)
         sdf_s = sdf_fn(pts_surface)
 
         # Off-surface random points
@@ -117,15 +118,18 @@ class PRISMLoss(nn.Module):
         pts_rand = pts_rand.requires_grad_(True)
         sdf_r = sdf_fn(pts_rand)
 
-        pts_all = torch.cat([pts_surface, pts_rand], dim=0)
+        # Compute ∇_x f at surface and random points separately, then
+        # concatenate the norms.  Passing pts_all=cat(...) as the `inputs`
+        # argument would break gradient tracking because sdf_s/sdf_r were
+        # each computed from their own leaf tensors, not from pts_all.
         sdf_all = torch.cat([sdf_s, sdf_r], dim=0)
-
-        grad = torch.autograd.grad(
+        grads = torch.autograd.grad(
             outputs=sdf_all,
-            inputs=pts_all,
+            inputs=[pts_surface, pts_rand],
             grad_outputs=torch.ones_like(sdf_all),
             create_graph=True,
-        )[0]   # (H + n_random, 3)
+        )
+        grad = torch.cat(grads, dim=0)   # (H + n_random, 3)
 
         eikonal = ((grad.norm(dim=-1) - 1.0) ** 2).mean()
         return eikonal

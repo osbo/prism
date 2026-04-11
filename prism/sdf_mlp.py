@@ -136,8 +136,9 @@ class FiLMLayer(nn.Module):
         self.beta  = nn.Linear(z_dim, out_features, bias=True)
 
         # Initialise γ → 1 and β → 0 (identity FiLM at the start)
-        nn.init.ones_(self.gamma.weight)
-        nn.init.zeros_(self.gamma.bias)
+        # γ(z) = W_γ z + b_γ; for γ=1 regardless of z: W_γ=0, b_γ=1
+        nn.init.zeros_(self.gamma.weight)
+        nn.init.ones_(self.gamma.bias)
         nn.init.zeros_(self.beta.weight)
         nn.init.zeros_(self.beta.bias)
 
