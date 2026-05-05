@@ -13,7 +13,7 @@ class PRISMConfig:
     pretrained_encoder: bool = True
     sdf_hidden:        int   = 256
     sdf_layers:        int   = 8
-    n_freqs:           int   = 6    # Fourier positional encoding frequencies
+    n_freqs:           int   = 2    # Fourier positional encoding frequencies (high values → checkerboard)
 
     # Rendering
     n_rays:    int   = 256          # rays sampled per image per training step
@@ -25,13 +25,13 @@ class PRISMConfig:
     lambda_render: float = 1.0
     lambda_depth:  float = 1.0
     lambda_normal: float = 0.5
-    lambda_eik:    float = 0.1
+    lambda_eik:    float = 0.5
     # Direct SDF supervision from GT depth (prevents all-negative saturation collapse)
     lambda_sdf_surface: float = 0.20
     lambda_sdf_sign:    float = 0.02
     # Opacity supervision from GT depth validity:
     # object pixels should accumulate mass, background should remain empty.
-    lambda_opacity:     float = 0.25
+    lambda_opacity:     float = 1.0
     # Keep photometric supervision on background to suppress "hallucinated" surfaces.
     lambda_bg_render:   float = 0.20
     lambda_bg_sdf:      float = 0.20
@@ -54,6 +54,9 @@ class PRISMConfig:
     # Evaluation
     mc_resolution: int   = 128      # marching cubes grid resolution
     mc_threshold:  float = 0.0
-    mc_bound:      float = 1.5      # [-bound, bound]^3 for marching cubes
+    mc_bound:      float = 2.5      # [-bound, bound]^3 for marching cubes
+
+    # Light-facing penalty: push n·l > 0 so render loss provides non-zero gradients.
+    lambda_light_facing: float = 0.2
     fscore_tau:    float = 0.01
     n_eval_pts:    int   = 100_000

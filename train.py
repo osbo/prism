@@ -60,6 +60,7 @@ def validate(model, loader, device):
             batch["K"].to(device),
             batch["depth"].to(device),
             batch["normal"].to(device),
+            gt_mask=batch["mask"].to(device),
         )
         total += losses["total"].item()
         n += 1
@@ -104,25 +105,29 @@ def train(cfg: PRISMConfig, resume_path: str | None = None):
             ckpt_path.unlink()
             log.info("Fresh run: removed stale %s", ckpt_path)
 
-    total_steps = len(train_loader) * cfg.n_epochs
+    run_epochs = cfg.n_epochs
+    total_steps = len(train_loader) * run_epochs
     model.train()
 
     t_prev = time.perf_counter()
-    for epoch in range(start_epoch, cfg.n_epochs):
+    end_epoch = start_epoch + run_epochs
+    for epoch in range(start_epoch, end_epoch):
         for batch in train_loader:
-            scale = lr_scale(step, cfg.warmup_steps, total_steps)
+            run_step = step - (start_epoch * len(train_loader))
+            scale = lr_scale(run_step, cfg.warmup_steps, total_steps)
             for pg in opt.param_groups:
                 pg["lr"] = pg["initial_lr"] * scale
 
             image  = batch["image"].to(device, non_blocking=True)
             depth  = batch["depth"].to(device, non_blocking=True)
             normal = batch["normal"].to(device, non_blocking=True)
+            mask   = batch["mask"].to(device, non_blocking=True)
             c2w    = batch["c2w"].to(device, non_blocking=True)
             K      = batch["K"].to(device, non_blocking=True)
 
             opt.zero_grad(set_to_none=True)
             with autocast("cuda", enabled=(device.type == "cuda")):
-                losses = model(image, c2w, K, depth, normal)
+                losses = model(image, c2w, K, depth, normal, gt_mask=mask)
 
             scaler.scale(losses["total"]).backward()
             scaler.unscale_(opt)
@@ -138,8 +143,9 @@ def train(cfg: PRISMConfig, resume_path: str | None = None):
                 t_prev = t_now
                 log.info(
                     "[%d/%d] step=%d  total=%.4f  render=%.4f  render_bg=%.4f  depth=%.4f  "
-                    "normal=%.4f  eik=%.4f  sdf0=%.4f  sdf_sign=%.4f  bg_sdf=%.4f  occ=%.4f  β=%.3f  lr=%.1e  %s",
-                    epoch, cfg.n_epochs, step,
+                    "normal=%.4f  eik=%.4f  sdf0=%.4f  sdf_sign=%.4f  bg_sdf=%.4f  occ=%.4f  "
+                    "lface=%.4f  β=%.3f  lr=%.1e  %s",
+                    epoch, end_epoch, step,
                     losses["total"].item(), losses["render"].item(),
                     losses["render_bg"].item(),
                     losses["depth"].item(), losses["normal"].item(),
@@ -147,6 +153,7 @@ def train(cfg: PRISMConfig, resume_path: str | None = None):
                     losses["sdf_surface"].item(), losses["sdf_sign"].item(),
                     losses["bg_sdf"].item(),
                     losses["opacity"].item(),
+                    losses["light_facing"].item(),
                     model.beta.item(),
                     opt.param_groups[1]["lr"],
                     (f"{ms_per_step:.1f}ms/step" if step > 0 else "—"),

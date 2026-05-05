@@ -153,6 +153,18 @@ def _load_exr_depth(path: Path) -> np.ndarray:
     )
 
 
+def _load_mask(pil_img: "Image.Image") -> np.ndarray:
+    """
+    (H, W) float32 foreground mask from alpha channel or black-background threshold.
+    OmniObject3D renders always have black backgrounds, so both approaches give the
+    same result; alpha is preferred when available (cleaner at edges).
+    """
+    if pil_img.mode in ("RGBA", "LA"):
+        return (np.array(pil_img)[:, :, -1] > 10).astype(np.float32)
+    rgb = np.array(pil_img.convert("RGB")).astype(np.float32)
+    return (rgb.sum(-1) > 10.0).astype(np.float32)
+
+
 def _scale_K(K: np.ndarray, orig_wh: Tuple[int, int], new_wh: Tuple[int, int]) -> np.ndarray:
     ow, oh = orig_wh
     nw, nh = new_wh
@@ -317,10 +329,17 @@ class OmniObject3DDataset(Dataset):
         obj_dir = self.render_root / cat / obj_id
         view_id = random.randint(0, self.n_views - 1)
 
-        rgb_img = Image.open(_rgb_path(obj_dir, view_id)).convert("RGB")
+        pil_raw = Image.open(_rgb_path(obj_dir, view_id))
+        mask_np = _load_mask(pil_raw)
+        rgb_img = pil_raw.convert("RGB")
         if self.img_resize:
             rgb_img = self.img_resize(rgb_img)
         image = self.to_tensor(rgb_img)
+        mask = torch.from_numpy(mask_np).unsqueeze(0)   # (1, H_orig, W_orig)
+        if self.img_resize:
+            mask = F.interpolate(mask.unsqueeze(0),
+                                 (self.image_size, self.image_size),
+                                 mode="nearest").squeeze(0)
 
         depth_np = np.load(_depth_path(obj_dir, view_id)).astype(np.float32)
         depth = torch.from_numpy(depth_np).unsqueeze(0)
@@ -339,6 +358,7 @@ class OmniObject3DDataset(Dataset):
             "image": image,
             "depth": depth,
             "normal": normal,
+            "mask": mask,
             "c2w": c2w,
             "K": K,
             "category": cat,
@@ -363,11 +383,18 @@ class OmniObject3DDataset(Dataset):
         depth_path = render_dir / "depths" / f"{fp}_depth.exr"
         normal_path = render_dir / "normals" / f"{fp}_normal.png"
 
-        rgb_img = Image.open(rgb_path).convert("RGB")
-        orig_wh = (rgb_img.width, rgb_img.height)
+        pil_raw = Image.open(rgb_path)
+        mask_np = _load_mask(pil_raw)
+        orig_wh = (pil_raw.width, pil_raw.height)
+        rgb_img = pil_raw.convert("RGB")
         if self.img_resize:
             rgb_img = self.img_resize(rgb_img)
         image = self.to_tensor(rgb_img)
+        mask = torch.from_numpy(mask_np).unsqueeze(0)   # (1, H_orig, W_orig)
+        if self.img_resize:
+            mask = F.interpolate(mask.unsqueeze(0),
+                                 (self.image_size, self.image_size),
+                                 mode="nearest").squeeze(0)
 
         depth_np = _load_exr_depth(depth_path).astype(np.float32)
         depth = torch.from_numpy(depth_np).unsqueeze(0)
@@ -400,6 +427,7 @@ class OmniObject3DDataset(Dataset):
             "image": image,
             "depth": depth,
             "normal": normal,
+            "mask": mask,
             "c2w": c2w,
             "K": K,
             "category": cat,

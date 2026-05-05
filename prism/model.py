@@ -43,13 +43,14 @@ class PRISM(nn.Module):
     # ------------------------------------------------------------------
     # Training forward
     # ------------------------------------------------------------------
-    def forward(self, image, c2w, K, gt_depth, gt_normal):
+    def forward(self, image, c2w, K, gt_depth, gt_normal, gt_mask=None):
         """
         image:     (B, 3, H, W) in [0, 1]
         c2w:       (B, 4, 4)
         K:         (B, 3, 3)
         gt_depth:  (B, 1, H, W)
         gt_normal: (B, 3, H, W) unit normals; zero on background
+        gt_mask:   (B, 1, H, W) float — 1=foreground, 0=background (from alpha/threshold)
         """
         cfg    = self.cfg
         B, _, H, W = image.shape
@@ -110,6 +111,7 @@ class PRISM(nn.Module):
 
         l_dir = F.normalize(light_pos - x_surf, dim=-1)
         v_dir = F.normalize(-rays_d, dim=-1)
+        ndl_vals = (pred_normal.detach() * l_dir).sum(-1)   # (N,) — for light-facing penalty
 
         pred_color = cook_torrance_ggx(
             pred_normal, v_dir, l_dir, albedo, roughness, metalness, light_int
@@ -126,13 +128,24 @@ class PRISM(nn.Module):
         gt_d      = depth_hw[bidx, r, c]                  # (N,)
         gt_n      = normal_hwc[bidx, r, c]                # (N, 3)
 
-        valid_d = (gt_d > near) & (gt_d < far)
-        bg_d = ~valid_d
+        # fg: foreground pixels — use GT mask when available (exact alpha/threshold),
+        # otherwise fall back to the depth-bounds proxy.
+        if gt_mask is not None:
+            fg = gt_mask[:, 0][bidx, r, c].bool()
+        else:
+            fg = (gt_d > near) & (gt_d < far)
+        bg_d    = ~fg
+        valid_d = fg & (gt_d > near) & (gt_d < far)   # fg pixels with usable depth
+
+        # Push light to illuminated side; when n·l ≤ 0, BRDF=0 and all render gradients vanish.
+        l_light_facing = (
+            F.relu(-ndl_vals[fg]).mean() if fg.any() else l_dir.sum() * 0.0
+        )
 
         # Render loss on object pixels.
         l_render_obj = (
-            F.l1_loss(pred_color[valid_d], gt_color[valid_d])
-            if valid_d.any()
+            F.l1_loss(pred_color[fg], gt_color[fg])
+            if fg.any()
             else pred_color.sum() * 0.0
         )
         # Weak background RGB supervision suppresses floating "ghost geometry".
@@ -164,10 +177,10 @@ class PRISM(nn.Module):
         w_sum = weights.sum(-1)
         w_prob = w_sum.clamp(1e-4, 1 - 1e-4)
         w_logit = torch.log(w_prob) - torch.log1p(-w_prob)
-        if valid_d.any():
+        if fg.any():
             l_occ_fg = F.binary_cross_entropy_with_logits(
-                w_logit[valid_d],
-                torch.ones_like(w_sum[valid_d]),
+                w_logit[fg],
+                torch.ones_like(w_sum[fg]),
             )
         else:
             l_occ_fg = w_sum.sum() * 0.0
@@ -237,6 +250,7 @@ class PRISM(nn.Module):
             + cfg.lambda_sdf_surface * l_sdf_surface
             + cfg.lambda_sdf_sign    * l_sdf_sign
             + cfg.lambda_opacity     * l_opacity
+            + cfg.lambda_light_facing * l_light_facing
         )
         return {
             "total":    total,
@@ -249,6 +263,7 @@ class PRISM(nn.Module):
             "sdf_surface": l_sdf_surface.detach(),
             "sdf_sign": l_sdf_sign.detach(),
             "opacity": l_opacity.detach(),
+            "light_facing": l_light_facing.detach(),
         }
 
     # ------------------------------------------------------------------
