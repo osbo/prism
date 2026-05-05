@@ -1,0 +1,14 @@
+{
+  "mean_chamfer": 25.768756866455078,
+  "mean_fscore": 0.0,
+  "tau": 0.01,
+  "per_object": [
+    {
+      "object_id": "clock_029",
+      "chamfer": 25.768756866455078,
+      "fscore": 0.0,
+      "precision": 0.0,
+      "recall": 0.0
+    }
+  ]
+}

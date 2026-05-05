@@ -1,144 +1,93 @@
-"""
-Cook-Torrance GGX BRDF evaluation (fully differentiable, batch-capable).
-
-Implements the microfacet BRDF:
-
-    f_r = (D * G * F) / (4 * (n·l) * (n·v))
-
-where:
-    D  = GGX normal distribution function (Trowbridge-Reitz)
-    G  = Smith height-correlated masking-shadowing function
-    F  = Schlick Fresnel approximation
-
-Full shading model (one point light, no indirect illumination):
-
-    L_o(v) = [k_d * albedo/π  +  f_r] * L_i * saturate(n·l)
-
-where k_d = (1 - metalness) enforces energy conservation
-and the specular F0 is lerp(0.04, albedo, metalness) (standard PBR convention).
-
-All inputs and outputs are (N, C) tensors so the entire pixel batch is
-evaluated in one vectorised forward pass.
-"""
-
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 EPS = 1e-6
 
 
-# ---------------------------------------------------------------------------
-# GGX / Trowbridge-Reitz distribution  D
-# ---------------------------------------------------------------------------
-
-def _ggx_distribution(n_dot_h: torch.Tensor, roughness: torch.Tensor) -> torch.Tensor:
-    """
-    D_GGX(n, h; α) = α² / (π * ((n·h)² * (α²-1) + 1)²)
-
-    Args:
-        n_dot_h:   (N,) clamped to [0, 1]
-        roughness: (N,) α ∈ (0, 1]
-    Returns:
-        D: (N,)
-    """
-    a2 = (roughness ** 2).clamp(min=EPS)
-    denom = (n_dot_h ** 2) * (a2 - 1.0) + 1.0
-    return a2 / (torch.pi * denom ** 2 + EPS)
-
-
-# ---------------------------------------------------------------------------
-# Smith geometry function  G
-# ---------------------------------------------------------------------------
-
-def _smith_g1_ggx(n_dot_x: torch.Tensor, roughness: torch.Tensor) -> torch.Tensor:
-    """
-    G1_Smith(n, x; α) using the GGX form.
-    k = α / 2  (direct lighting remap from Schlick)
-    """
-    k = roughness / 2.0
-    return n_dot_x / (n_dot_x * (1.0 - k) + k + EPS)
-
-
-def _smith_geometry(n_dot_l: torch.Tensor, n_dot_v: torch.Tensor,
-                    roughness: torch.Tensor) -> torch.Tensor:
-    """
-    Height-correlated Smith G = G1(n,l) * G1(n,v)
-    """
-    return _smith_g1_ggx(n_dot_l, roughness) * _smith_g1_ggx(n_dot_v, roughness)
-
-
-# ---------------------------------------------------------------------------
-# Schlick Fresnel  F
-# ---------------------------------------------------------------------------
-
-def _schlick_fresnel(f0: torch.Tensor, v_dot_h: torch.Tensor) -> torch.Tensor:
-    """
-    F(v, h) = F0 + (1 - F0) * (1 - v·h)^5
-
-    Args:
-        f0:     (N, 3) reflectance at normal incidence
-        v_dot_h:(N,)   clamped to [0, 1]
-    Returns:
-        F: (N, 3)
-    """
-    return f0 + (1.0 - f0) * (1.0 - v_dot_h.unsqueeze(-1)).clamp(min=0) ** 5
-
-
-# ---------------------------------------------------------------------------
-# Full Cook-Torrance GGX evaluation
-# ---------------------------------------------------------------------------
-
 def cook_torrance_ggx(
-    normals: torch.Tensor,        # (N, 3) surface normals (unit)
-    view_dirs: torch.Tensor,      # (N, 3) direction FROM surface TO camera (unit)
-    light_dirs: torch.Tensor,     # (N, 3) direction FROM surface TO light (unit)
-    light_intensity: torch.Tensor,# (N, 3) light radiance
-    albedo: torch.Tensor,         # (N, 3) diffuse albedo ∈ [0,1]
-    roughness: torch.Tensor,      # (N, 1) or (N,) ∈ [0,1]
-    metalness: torch.Tensor,      # (N, 1) or (N,) ∈ [0,1]
+    n:               torch.Tensor,  # (..., 3) unit surface normal
+    v:               torch.Tensor,  # (..., 3) unit view direction (toward camera)
+    l:               torch.Tensor,  # (..., 3) unit light direction (toward light)
+    albedo:          torch.Tensor,  # (..., 3) in [0, 1]
+    roughness:       torch.Tensor,  # (..., 1) in [0, 1]
+    metalness:       torch.Tensor,  # (..., 1) in [0, 1]
+    light_intensity: torch.Tensor,  # (..., 3)
 ) -> torch.Tensor:
-    """
-    Evaluate outgoing radiance L_o for each surface point given:
-      - shading geometry (n, v, l)
-      - material parameters (albedo, roughness, metalness)
-      - incident light radiance L_i from the predicted point light
+    """Cook-Torrance GGX BRDF × incoming radiance.  Returns (..., 3) RGB."""
+    h   = F.normalize(v + l, dim=-1)
+    ndl = (n * l).sum(-1, keepdim=True)                   # can be ≤ 0 (back-face)
+    ndv = (n * v).sum(-1, keepdim=True).clamp(EPS, 1.0)
+    ndh = (n * h).sum(-1, keepdim=True).clamp(EPS, 1.0)
+    hdv = (h * v).sum(-1, keepdim=True).clamp(0.0, 1.0)
 
-    Returns:
-        L_o: (N, 3) outgoing RGB radiance (linear), clipped to [0, ∞)
+    a  = roughness.clamp(0.04, 1.0) ** 2
+    a2 = a ** 2
 
-    Notes:
-        • roughness is clamped to [0.04, 1] to prevent GGX singularity.
-        • All vectors are assumed unit-length; dot products are clamped to [0, 1].
-        • Energy conservation: k_d = (1 - metalness) * (1 - F).
-    """
-    roughness = roughness.squeeze(-1).clamp(0.04, 1.0)  # (N,)
-    metalness = metalness.squeeze(-1)                    # (N,)
+    # GGX normal distribution
+    D = a2 / (torch.pi * ((ndh**2 * (a2 - 1.0) + 1.0) ** 2 + EPS))
 
-    # Half-vector
-    h = F.normalize(view_dirs + light_dirs, dim=-1)     # (N, 3)
+    # Schlick Fresnel
+    F0 = 0.04 * (1.0 - metalness) + albedo * metalness
+    Fr = F0 + (1.0 - F0) * (1.0 - hdv) ** 5
 
-    # Dot products — clamped to avoid NaN / negative values
-    n_dot_l = (normals * light_dirs).sum(-1).clamp(0.0, 1.0)   # (N,)
-    n_dot_v = (normals * view_dirs).sum(-1).clamp(0.0, 1.0)    # (N,)
-    n_dot_h = (normals * h).sum(-1).clamp(0.0, 1.0)            # (N,)
-    v_dot_h = (view_dirs * h).sum(-1).clamp(0.0, 1.0)          # (N,)
+    # Smith GGX geometry
+    k  = a / 2.0
+    G  = (ndv / (ndv * (1.0 - k) + k + EPS)) * (ndl.clamp(EPS, 1.0) / (ndl.clamp(EPS, 1.0) * (1.0 - k) + k + EPS))
 
-    # F0: lerp(dielectric=0.04, albedo, metalness)  — standard PBR
-    f0 = 0.04 * (1.0 - metalness.unsqueeze(-1)) + albedo * metalness.unsqueeze(-1)  # (N,3)
+    specular = D * Fr * G / (4.0 * ndv * ndl.clamp(EPS, 1.0) + EPS)
+    diffuse  = (albedo / torch.pi) * (1.0 - metalness) * (1.0 - Fr)
 
-    # Microfacet terms
-    D = _ggx_distribution(n_dot_h, roughness)   # (N,)
-    G = _smith_geometry(n_dot_l, n_dot_v, roughness)  # (N,)
-    Fres = _schlick_fresnel(f0, v_dot_h)         # (N, 3)
+    return ((diffuse + specular) * light_intensity * ndl.clamp(min=0.0)).clamp(0.0, 1.0)
 
-    # Specular BRDF
-    denom = (4.0 * n_dot_v * n_dot_l).clamp(min=EPS)  # (N,)
-    specular = (D * G).unsqueeze(-1) * Fres / denom.unsqueeze(-1)  # (N, 3)
 
-    # Diffuse BRDF (Lambertian, energy-conserving)
-    k_d = (1.0 - Fres) * (1.0 - metalness.unsqueeze(-1))
-    diffuse = k_d * albedo / torch.pi               # (N, 3)
+class BRDFHead(nn.Module):
+    """z → (albedo, roughness, metalness) — spatially uniform per object."""
 
-    # Outgoing radiance
-    L_o = (diffuse + specular) * light_intensity * n_dot_l.unsqueeze(-1)  # (N, 3)
-    return L_o.clamp(min=0.0)
+    def __init__(self, latent_dim: int = 128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(latent_dim, 128), nn.ReLU(),
+            nn.Linear(128, 128),        nn.ReLU(),
+            nn.Linear(128, 5),
+        )
+        # Init: albedo→0.5 (bias=0), roughness→0.5 (bias=0), metalness→0.1 (bias≈-2.2)
+        # Zero the last layer's weights so initial output depends only on bias, not z.
+        nn.init.zeros_(self.net[-1].weight)
+        bias = torch.zeros(5)
+        bias[4] = -2.2   # metalness starts low (~0.1); most surfaces are dielectric
+        self.net[-1].bias = nn.Parameter(bias)
+
+    def forward(self, z: torch.Tensor):
+        out       = self.net(z)
+        albedo    = out[..., :3].sigmoid()
+        roughness = out[..., 3:4].sigmoid()
+        metalness = out[..., 4:5].sigmoid()
+        return albedo, roughness, metalness
+
+
+class LightHead(nn.Module):
+    """z → (light_pos, light_intensity) — single point light per object."""
+
+    def __init__(self, latent_dim: int = 128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(latent_dim, 128), nn.ReLU(),
+            nn.Linear(128, 128),        nn.ReLU(),
+            nn.Linear(128, 6),
+        )
+        # Init intensity bias to +2.0 → softplus(2)≈2.1, sigmoid(2)≈0.88 gradient.
+        # Without this, random init can push intensity to softplus(very_negative)≈0
+        # and the gradient (sigmoid(very_negative)≈0) vanishes — unrecoverable.
+        nn.init.zeros_(self.net[-1].weight)
+        bias = torch.zeros(6)
+        bias[2]  = 4.0   # light_pos z=4: on camera side (cameras are at radius ~4),
+        #                   so n·l > 0 for front-facing surfaces at init
+        bias[3:] = 2.0   # light_int → softplus(2) ≈ 2.1, gradient sigmoid(2) ≈ 0.88
+        self.net[-1].bias = nn.Parameter(bias)
+
+    def forward(self, z: torch.Tensor):
+        out       = self.net(z)
+        light_pos = out[..., :3]
+        light_int = F.softplus(out[..., 3:])
+        return light_pos, light_int
