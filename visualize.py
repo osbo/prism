@@ -29,19 +29,34 @@ def to_uint8(t: torch.Tensor) -> np.ndarray:
     return (t.clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
 
 
-def depth_to_rgb(depth: torch.Tensor) -> np.ndarray:
-    """Normalise depth to [0,1] and apply a simple colormap (near=bright, far=dark)."""
+def depth_to_rgb(depth: torch.Tensor, opacity: torch.Tensor, alpha_thresh: float = 0.2) -> np.ndarray:
+    """Visualize depth only on confident (non-background) pixels."""
     d = depth.cpu().float()
-    lo, hi = d[d > 0].min() if (d > 0).any() else d.min(), d.max()
+    a = opacity.cpu().float()
+    fg = a > alpha_thresh
+    if fg.any():
+        lo, hi = d[fg].min(), d[fg].max()
+    else:
+        lo, hi = d.min(), d.max()
     d = ((d - lo) / (hi - lo + 1e-6)).clamp(0, 1)
     d = 1.0 - d                         # near = white, far = dark
+    d[~fg] = 0.0
     arr = (d.numpy() * 255).astype(np.uint8)
     return np.stack([arr, arr, arr], axis=-1)
 
 
-def normal_to_rgb(normal: torch.Tensor) -> np.ndarray:
-    """Map normals from [-1, 1] to [0, 255]."""
-    return to_uint8((normal * 0.5 + 0.5))
+def normal_to_rgb(normal: torch.Tensor, opacity: torch.Tensor, alpha_thresh: float = 0.2) -> np.ndarray:
+    """Map normals to RGB and hide low-opacity background."""
+    n = (normal * 0.5 + 0.5).clamp(0, 1)
+    fg = (opacity.cpu().float() > alpha_thresh)
+    n = n.cpu()
+    n[~fg] = 0.0
+    return to_uint8(n)
+
+def opacity_to_rgb(opacity: torch.Tensor) -> np.ndarray:
+    a = opacity.cpu().float().clamp(0, 1)
+    arr = (a.numpy() * 255).astype(np.uint8)
+    return np.stack([arr, arr, arr], axis=-1)
 
 
 def make_panel(images: list[np.ndarray], labels: list[str]) -> Image.Image:
@@ -92,12 +107,13 @@ def visualize(cfg: PRISMConfig, n_objects: int | None, out_dir: Path):
 
         gt_rgb   = to_uint8(image[0].permute(1, 2, 0))
         pred_rgb = to_uint8(rendered["color"])
-        pred_d   = depth_to_rgb(rendered["depth"])
-        pred_n   = normal_to_rgb(rendered["normal"])
+        pred_d   = depth_to_rgb(rendered["depth"], rendered["opacity"])
+        pred_n   = normal_to_rgb(rendered["normal"], rendered["opacity"])
+        pred_o   = opacity_to_rgb(rendered["opacity"])
 
         panel = make_panel(
-            [gt_rgb, pred_rgb, pred_d, pred_n],
-            ["GT image", "Predicted color", "Predicted depth", "Predicted normals"],
+            [gt_rgb, pred_rgb, pred_d, pred_n, pred_o],
+            ["GT image", "Predicted color", "Predicted depth", "Predicted normals", "Predicted opacity"],
         )
         panel.save(out_dir / f"{obj_id}.png")
         log.info("  saved %s", out_dir / f"{obj_id}.png")

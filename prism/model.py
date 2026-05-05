@@ -38,7 +38,7 @@ class PRISM(nn.Module):
 
     @property
     def beta(self):
-        return self.log_beta.exp().clamp(min=1e-4)
+        return self.log_beta.exp().clamp(min=self.cfg.beta_min)
 
     # ------------------------------------------------------------------
     # Training forward
@@ -65,9 +65,12 @@ class PRISM(nn.Module):
 
         # ---- Stratified point sampling ---------------------------------
         near, far = cfg.near, cfg.far
-        t_base  = torch.linspace(near, far, cfg.n_samples, device=device)
-        t_noise = torch.rand(N, cfg.n_samples, device=device) * (far - near) / cfg.n_samples
-        t_vals  = (t_base + t_noise)                          # (N, n_samples)
+        # NeuS requires samples sorted along the ray. Use stratified bins with
+        # one random sample per bin, preserving near→far order.
+        t_edges = torch.linspace(near, far, cfg.n_samples + 1, device=device)
+        lower = t_edges[:-1].unsqueeze(0).expand(N, -1)
+        upper = t_edges[1:].unsqueeze(0).expand(N, -1)
+        t_vals = lower + torch.rand(N, cfg.n_samples, device=device) * (upper - lower)
 
         pts = rays_o[:, None] + t_vals[:, :, None] * rays_d[:, None]  # (N, n_samples, 3)
 
@@ -96,6 +99,9 @@ class PRISM(nn.Module):
         pred_normal = F.normalize(
             (weights[:, :, None] * normals).sum(1), dim=-1
         )                                                          # (N, 3)
+        # Keep training-time shading stable by orienting normals toward camera.
+        view_dot = (pred_normal * (-rays_d)).sum(-1, keepdim=True)
+        pred_normal = torch.where(view_dot < 0, -pred_normal, pred_normal)
         x_surf = rays_o + pred_depth[:, None] * rays_d            # (N, 3)
 
         # ---- BRDF + light ----------------------------------------------
@@ -120,27 +126,101 @@ class PRISM(nn.Module):
         gt_d      = depth_hw[bidx, r, c]                  # (N,)
         gt_n      = normal_hwc[bidx, r, c]                # (N, 3)
 
-        # Render loss — only where light is on the right side (ndl > 0)
-        # and weight mass is meaningful (ray hit something)
-        hit  = weights.sum(-1) > 0.1
-        l_render = F.l1_loss(pred_color[hit], gt_color[hit]) if hit.any() else pred_color.sum() * 0.0
-
-        # Depth loss — valid GT only; normalize by ``far`` so L1 is O(1) like RGB
-        # (raw world distances ~[near, far] were ~3× larger than render terms, so
-        # ``total`` looked flat / noisy even when render was improving).
         valid_d = (gt_d > near) & (gt_d < far)
+        bg_d = ~valid_d
+
+        # Render loss on object pixels.
+        l_render_obj = (
+            F.l1_loss(pred_color[valid_d], gt_color[valid_d])
+            if valid_d.any()
+            else pred_color.sum() * 0.0
+        )
+        # Weak background RGB supervision suppresses floating "ghost geometry".
+        l_render_bg = (
+            F.l1_loss(pred_color[bg_d], gt_color[bg_d])
+            if bg_d.any()
+            else pred_color.sum() * 0.0
+        )
+        l_render = l_render_obj
+
+        # Depth loss — valid GT only. Use metric-space L1 directly so large
+        # geometric errors produce strong corrective gradients.
         if valid_d.any():
-            inv = 1.0 / (far + 1e-6)
-            l_depth = F.l1_loss(pred_depth[valid_d] * inv, gt_d[valid_d] * inv)
+            l_depth = F.l1_loss(pred_depth[valid_d], gt_d[valid_d])
         else:
             l_depth = pred_depth.sum() * 0.0
+
+        # Background SDF constraint: rays without valid GT depth should stay
+        # outside (positive SDF) near and far, preventing fog-like occupancy.
+        if bg_d.any():
+            sdf_bg_near = sdf_vals[bg_d, 0]
+            sdf_bg_far = sdf_vals[bg_d, -1]
+            l_bg_sdf = F.softplus(-sdf_bg_near).mean() + F.softplus(-sdf_bg_far).mean()
+        else:
+            l_bg_sdf = sdf_vals.sum() * 0.0
+
+        # Opacity supervision from depth validity.
+        # For object pixels, accumulated weight should be high; for background, low.
+        w_sum = weights.sum(-1)
+        w_prob = w_sum.clamp(1e-4, 1 - 1e-4)
+        w_logit = torch.log(w_prob) - torch.log1p(-w_prob)
+        if valid_d.any():
+            l_occ_fg = F.binary_cross_entropy_with_logits(
+                w_logit[valid_d],
+                torch.ones_like(w_sum[valid_d]),
+            )
+        else:
+            l_occ_fg = w_sum.sum() * 0.0
+        if bg_d.any():
+            l_occ_bg = F.binary_cross_entropy_with_logits(
+                w_logit[bg_d],
+                torch.zeros_like(w_sum[bg_d]),
+            )
+        else:
+            l_occ_bg = w_sum.sum() * 0.0
+        l_opacity = l_occ_fg + l_occ_bg
+
+        # SDF supervision from GT depth:
+        #  - SDF(x(gt_depth)) ≈ 0
+        #  - points before the surface should be outside (SDF > 0)
+        #  - points after the surface should be inside  (SDF < 0)
+        # This keeps SDF sign/scale grounded even when NeuS weights saturate.
+        if valid_d.any():
+            t_valid = t_vals[valid_d]            # (Nv, n_samples)
+            sdf_valid = sdf_vals[valid_d]        # (Nv, n_samples)
+            gd_valid = gt_d[valid_d]             # (Nv,)
+
+            # Surface-zero constraint at sample closest to GT depth.
+            k = (t_valid - gd_valid[:, None]).abs().argmin(dim=-1)           # (Nv,)
+            sdf_at_surface = sdf_valid.gather(1, k[:, None]).squeeze(1)      # (Nv,)
+            l_sdf_surface = sdf_at_surface.abs().mean()
+
+            # Sign constraints on stratified samples around the GT depth.
+            dt = (far - near) / max(cfg.n_samples, 1)
+            front_mask = t_valid < (gd_valid[:, None] - dt)
+            back_mask = t_valid > (gd_valid[:, None] + dt)
+
+            if front_mask.any():
+                # Penalize negative SDF in front of the observed surface.
+                l_sdf_front = F.softplus(-sdf_valid[front_mask]).mean()
+            else:
+                l_sdf_front = sdf_valid.sum() * 0.0
+            if back_mask.any():
+                # Penalize positive SDF behind the observed surface.
+                l_sdf_back = F.softplus(sdf_valid[back_mask]).mean()
+            else:
+                l_sdf_back = sdf_valid.sum() * 0.0
+            l_sdf_sign = l_sdf_front + l_sdf_back
+        else:
+            l_sdf_surface = sdf_vals.sum() * 0.0
+            l_sdf_sign = sdf_vals.sum() * 0.0
 
         # Normal loss — valid (non-background) GT normals
         valid_n = gt_n.norm(dim=-1) > 0.5
         if valid_n.any():
             pn, gn = pred_normal[valid_n], gt_n[valid_n]
-            l_normal = (1.0 - F.cosine_similarity(pn, gn, dim=-1)).mean() \
-                     + F.l1_loss(pn, F.normalize(gn, dim=-1))
+            # Sign-invariant cosine handles possible normal convention mismatch.
+            l_normal = (1.0 - F.cosine_similarity(pn, gn, dim=-1).abs()).mean()
         else:
             l_normal = pred_normal.sum() * 0.0
 
@@ -149,16 +229,26 @@ class PRISM(nn.Module):
 
         total = (
             cfg.lambda_render   * l_render
+            + cfg.lambda_bg_render * l_render_bg
+            + cfg.lambda_bg_sdf * l_bg_sdf
             + cfg.lambda_depth  * l_depth
             + cfg.lambda_normal * l_normal
             + cfg.lambda_eik    * l_eikonal
+            + cfg.lambda_sdf_surface * l_sdf_surface
+            + cfg.lambda_sdf_sign    * l_sdf_sign
+            + cfg.lambda_opacity     * l_opacity
         )
         return {
             "total":    total,
             "render":   l_render.detach(),
+            "render_bg": l_render_bg.detach(),
+            "bg_sdf":   l_bg_sdf.detach(),
             "depth":    l_depth.detach(),
             "normal":   l_normal.detach(),
             "eikonal":  l_eikonal.detach(),
+            "sdf_surface": l_sdf_surface.detach(),
+            "sdf_sign": l_sdf_sign.detach(),
+            "opacity": l_opacity.detach(),
         }
 
     # ------------------------------------------------------------------
@@ -227,8 +317,17 @@ class PRISM(nn.Module):
             g = g.reshape(n, n_s, 3)
 
             w  = neus_weights(sf.detach(), self.beta)
-            d  = (w * t).sum(-1)
-            nm = F.normalize((w[:, :, None] * g).sum(1), dim=-1)
+            w_sum = w.sum(-1)
+            # Use the dominant surface sample for crisp inference maps.
+            # (Expected-value integration is useful for training but often
+            # produces streaky depth/normal visualizations at test time.)
+            k = w.argmax(dim=-1)  # (n,)
+            ridx = torch.arange(n, device=device)
+            d = t[ridx, k]
+            nm = F.normalize(g[ridx, k], dim=-1)
+            # Orient normals toward the camera for stable visualisation.
+            view_dot = (nm * (-rd)).sum(-1, keepdim=True)
+            nm = torch.where(view_dot < 0, -nm, nm)
             xs_ = ro + d[:, None] * rd
 
             l_dir = F.normalize(lp - xs_, dim=-1)
@@ -238,9 +337,15 @@ class PRISM(nn.Module):
             colors[i:i+n] = col
             depths[i:i+n] = d
             norms[i:i+n]  = nm
+            # Store visibility in alpha channel proxy for downstream masking.
+            # (reuse depths tensor not needed; create lazily below)
+            if i == 0:
+                opac = torch.zeros(H * W, device=device)
+            opac[i:i+n] = w_sum
 
         return {
             "color":  colors.reshape(H, W, 3).clamp(0, 1),
             "depth":  depths.reshape(H, W),
             "normal": norms.reshape(H, W, 3),
+            "opacity": opac.reshape(H, W).clamp(0, 1),
         }

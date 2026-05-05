@@ -118,9 +118,11 @@ def run_debug(cfg: PRISMConfig, n_objects: int = 5):
         # ------------------------------------------------------------------
         with torch.no_grad():
             rays_o, rays_d, pix_rc, bidx = sample_rays(c2w, K, H, W, 512, device)
-            t_base  = torch.linspace(near, far, cfg.n_samples, device=device)
-            t_noise = torch.rand(rays_o.shape[0], cfg.n_samples, device=device) * (far - near) / cfg.n_samples
-            t_v     = t_base + t_noise
+            # Match training stratified sampling (sorted near→far per ray).
+            t_edges = torch.linspace(near, far, cfg.n_samples + 1, device=device)
+            lower = t_edges[:-1].unsqueeze(0).expand(rays_o.shape[0], -1)
+            upper = t_edges[1:].unsqueeze(0).expand(rays_o.shape[0], -1)
+            t_v = lower + torch.rand(rays_o.shape[0], cfg.n_samples, device=device) * (upper - lower)
             pts_r   = rays_o[:, None] + t_v[:, :, None] * rays_d[:, None]
             z_r     = z.expand(rays_o.shape[0], -1)
             z_p     = z_r[:, None].expand(-1, cfg.n_samples, -1).reshape(-1, z.shape[-1])

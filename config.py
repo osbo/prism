@@ -26,6 +26,17 @@ class PRISMConfig:
     lambda_depth:  float = 1.0
     lambda_normal: float = 0.5
     lambda_eik:    float = 0.1
+    # Direct SDF supervision from GT depth (prevents all-negative saturation collapse)
+    lambda_sdf_surface: float = 0.20
+    lambda_sdf_sign:    float = 0.02
+    # Opacity supervision from GT depth validity:
+    # object pixels should accumulate mass, background should remain empty.
+    lambda_opacity:     float = 0.25
+    # Keep photometric supervision on background to suppress "hallucinated" surfaces.
+    lambda_bg_render:   float = 0.20
+    lambda_bg_sdf:      float = 0.20
+    # Prevent NeuS sharpness from collapsing to overly brittle values.
+    beta_min:           float = 0.50
 
     # Training
     n_epochs:       int   = 100

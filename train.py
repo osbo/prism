@@ -137,12 +137,17 @@ def train(cfg: PRISMConfig, resume_path: str | None = None):
                 )
                 t_prev = t_now
                 log.info(
-                    "[%d/%d] step=%d  total=%.4f  render=%.4f  depth=%.4f  "
-                    "normal=%.4f  eik=%.4f  β=%.3f  lr=%.1e  %s",
+                    "[%d/%d] step=%d  total=%.4f  render=%.4f  render_bg=%.4f  depth=%.4f  "
+                    "normal=%.4f  eik=%.4f  sdf0=%.4f  sdf_sign=%.4f  bg_sdf=%.4f  occ=%.4f  β=%.3f  lr=%.1e  %s",
                     epoch, cfg.n_epochs, step,
                     losses["total"].item(), losses["render"].item(),
+                    losses["render_bg"].item(),
                     losses["depth"].item(), losses["normal"].item(),
-                    losses["eikonal"].item(), model.beta.item(),
+                    losses["eikonal"].item(),
+                    losses["sdf_surface"].item(), losses["sdf_sign"].item(),
+                    losses["bg_sdf"].item(),
+                    losses["opacity"].item(),
+                    model.beta.item(),
                     opt.param_groups[1]["lr"],
                     (f"{ms_per_step:.1f}ms/step" if step > 0 else "—"),
                 )
