@@ -24,7 +24,10 @@ class ImageEncoder(nn.Module):
         self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
         self.register_buffer("std",  torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
 
-    def forward(self, image: torch.Tensor) -> torch.Tensor:
-        """image: (B, 3, H, W) in [0, 1].  Returns z: (B, latent_dim)."""
-        x = (image - self.mean) / self.std
-        return self.proj(self.backbone(x))
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        """images: (B, N, 3, H, W) in [0, 1].  Returns z: (B, latent_dim)."""
+        B, N, C, H, W = images.shape
+        x = images.reshape(B * N, C, H, W)
+        x = (x - self.mean) / self.std
+        z = self.proj(self.backbone(x))          # (B*N, latent_dim)
+        return z.reshape(B, N, -1).mean(dim=1)   # (B, latent_dim) — mean over views

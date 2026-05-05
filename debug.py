@@ -96,9 +96,9 @@ def m_light(model, z, pred_n, pred_d, rays_o, rays_d, gt_col, valid_d):
     N = pred_n.shape[0]
     with torch.no_grad():
         ab, ro, me = model.brdf_head(z.unsqueeze(0))
-        lp, li    = model.light_head(z.unsqueeze(0))
+        lp, li, amb = model.light_head(z.unsqueeze(0))
     ab = ab.expand(N,-1); ro = ro.expand(N,-1); me = me.expand(N,-1)
-    lp_v = lp.expand(N,-1); li_v = li.expand(N,-1)
+    lp_v = lp.expand(N,-1); li_v = li.expand(N,-1); amb_v = amb.expand(N,-1)
     x    = rays_o + pred_d[:,None] * rays_d
     v    = F.normalize(-rays_d, dim=-1)
     l    = F.normalize(lp_v - x, dim=-1)
@@ -107,8 +107,8 @@ def m_light(model, z, pred_n, pred_d, rays_o, rays_d, gt_col, valid_d):
     l_ora   = F.normalize(rays_o[0:1].expand(N,-1) - x, dim=-1)
     ndl_ora = (pred_n * l_ora).sum(-1)
     with torch.no_grad():
-        col_pred = cook_torrance_ggx(pred_n, v, l,     ab, ro, me, li_v)
-        col_ora  = cook_torrance_ggx(pred_n, v, l_ora, ab, ro, me, li_v)
+        col_pred = cook_torrance_ggx(pred_n, v, l,     ab, ro, me, li_v, amb_v)
+        col_ora  = cook_torrance_ggx(pred_n, v, l_ora, ab, ro, me, li_v, amb_v)
     frac_pos = (ndl > 0).float().mean().item()
     status = PASS if frac_pos > 0.75 else FAIL if frac_pos < 0.50 else WARN
     result = {"status": status, "frac_pos": frac_pos, "mean_ndl": ndl.mean().item(),
@@ -124,11 +124,11 @@ def m_mask(model, batch, cfg, device):
         from scipy.ndimage import label as nd_label
     except ImportError:
         return {"status": WARN, "note": "scipy missing"}
-    image = batch["image"].to(device); c2w = batch["c2w"].to(device)
-    K = batch["K"].to(device);         gt_d = batch["depth"]
-    B, C, H, W = image.shape
+    images = batch["images"].to(device); c2w = batch["c2w"].to(device)
+    K = batch["K"].to(device);           gt_d = batch["depth"]
+    B, N, C, H, W = images.shape
     scale = 4; Hs, Ws = H // scale, W // scale
-    img_s = F.interpolate(image, (Hs, Ws), mode="bilinear", align_corners=False)
+    img_s = F.interpolate(images.reshape(B * N, C, H, W), (Hs, Ws), mode="bilinear", align_corners=False).reshape(B, N, C, Hs, Ws)
     Ks = K.clone()
     for i, j in [(0,0),(1,1),(0,2),(1,2)]: Ks[:,i,j] /= scale
     with torch.no_grad():
@@ -290,22 +290,22 @@ def run_debug(cfg, n_objects=1):
     log.info(f"{cfg.checkpoint}  epoch={ckpt.get('epoch','?')}  "
              f"step={ckpt.get('step','?')}  β={model.beta.item():.3f}")
 
-    ds     = OmniObject3DDataset(cfg.data_root, split="test", image_size=cfg.image_size)
+    ds     = OmniObject3DDataset(cfg.data_root, split="test", image_size=cfg.image_size, n_input_views=cfg.n_input_views)
     loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=0)
     z_list, all_metrics = [], []
 
     for i, batch in enumerate(loader):
         if i >= n_objects: break
         obj_id = batch["object_id"][0]
-        image  = batch["image"].to(device)
+        images = batch["images"].to(device)
         c2w    = batch["c2w"].to(device)
         K_mat  = batch["K"].to(device)
         gt_d   = batch["depth"].to(device)
         gt_n   = batch["normal"].to(device)
-        B, _, H, W = image.shape
+        B, N, _, H, W = images.shape
 
         with torch.no_grad():
-            z = model.encoder(image)
+            z = model.encoder(images)
         z_list.append(z.cpu())
 
         near, far = cfg.near, cfg.far

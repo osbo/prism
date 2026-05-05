@@ -4,16 +4,17 @@ from dataclasses import dataclass, field
 @dataclass
 class PRISMConfig:
     # Data
-    data_root:   str = "/home/osbo/orcd/pool/omniobject3d/extracted"
-    image_size:  int = 256          # resize for training speed (800 for full quality)
-    num_workers: int = 4
+    data_root:      str = "/home/osbo/orcd/pool/omniobject3d/extracted"
+    image_size:     int = 256          # resize for training speed (800 for full quality)
+    num_workers:    int = 4
+    n_input_views:  int = 5            # context views fed to encoder; 1 = classic single-view
 
     # Model
     latent_dim:        int   = 128
     pretrained_encoder: bool = True
     sdf_hidden:        int   = 256
     sdf_layers:        int   = 8
-    n_freqs:           int   = 4    # Fourier positional encoding frequencies (high values → checkerboard)
+    n_freqs:           int   = 8    # Fourier positional encoding frequencies (high values → checkerboard)
     # Sphere initialization (not a structural restriction).
     sdf_init_radius:   float = 0.35
 
@@ -34,19 +35,15 @@ class PRISMConfig:
     lambda_normal: float = 0.5
     lambda_eik:    float = 0.5
     # Direct SDF supervision from GT depth (prevents all-negative saturation collapse)
-    lambda_sdf_surface: float = 0.20
-    lambda_sdf_sign:    float = 0.02
+    lambda_sdf_surface: float = 0.50
+    lambda_sdf_sign:    float = 0.10
     # Closure priors: keep origin inside and boundary outside.
     lambda_closure:     float = 0.01
     closure_center_margin: float = 0.05
     closure_boundary_margin: float = 0.05
-    # Opacity supervision from GT depth validity:
-    # object pixels should accumulate mass, background should remain empty.
-    lambda_opacity:     float = 1.0
     # Background constraints from mask (outside object should stay empty).
     lambda_bg_render:   float = 0.0
     lambda_bg_sdf:      float = 0.20
-    lambda_bg_inf:      float = 0.50
     bg_sdf_margin:      float = 0.02
     # Silhouette matching (sampled rays): drives object contour away from spherical blob.
     lambda_sil_bce:     float = 2.0

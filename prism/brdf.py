@@ -12,9 +12,10 @@ def cook_torrance_ggx(
     albedo:          torch.Tensor,  # (..., 3) in [0, 1]
     roughness:       torch.Tensor,  # (..., 1) in [0, 1]
     metalness:       torch.Tensor,  # (..., 1) in [0, 1]
-    light_intensity: torch.Tensor,  # (..., 3)
+    light_intensity: torch.Tensor,  # (..., 3) point-light radiance scale
+    ambient:         torch.Tensor,  # (..., 3) isotropic ambient strength (× diffuse albedo)
 ) -> torch.Tensor:
-    """Cook-Torrance GGX BRDF × incoming radiance.  Returns (..., 3) RGB."""
+    """Cook-Torrance GGX BRDF × point light + diffuse ambient fill.  Returns (..., 3) RGB."""
     h   = F.normalize(v + l, dim=-1, eps=EPS)
     ndl = (n * l).sum(-1, keepdim=True)                   # can be ≤ 0 (back-face)
     ndv = (n * v).sum(-1, keepdim=True).clamp(EPS, 1.0)
@@ -38,7 +39,10 @@ def cook_torrance_ggx(
     specular = D * Fr * G / (4.0 * ndv * ndl.clamp(EPS, 1.0) + EPS)
     diffuse  = (albedo / torch.pi) * (1.0 - metalness) * (1.0 - Fr)
 
-    out = ((diffuse + specular) * light_intensity * ndl.clamp(min=0.0)).clamp(0.0, 1.0)
+    direct = (diffuse + specular) * light_intensity * ndl.clamp(min=0.0)
+    # Isotropic ambient: tint albedo on the diffuse lobe only (no specular in flat fill).
+    amb_fill = ambient * (albedo / torch.pi) * (1.0 - metalness)
+    out = (direct + amb_fill).clamp(0.0, 1.0)
     return torch.nan_to_num(out, nan=0.0, posinf=1.0, neginf=0.0)
 
 
@@ -68,28 +72,29 @@ class BRDFHead(nn.Module):
 
 
 class LightHead(nn.Module):
-    """z → (light_pos, light_intensity) — single point light per object."""
+    """z → (light_pos, point_light_intensity, ambient) — point + isotropic ambient."""
 
     def __init__(self, latent_dim: int = 128):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(latent_dim, 128), nn.ReLU(),
             nn.Linear(128, 128),        nn.ReLU(),
-            nn.Linear(128, 6),
+            nn.Linear(128, 9),
         )
         # Init intensity bias to +2.0 → softplus(2)≈2.1, sigmoid(2)≈0.88 gradient.
         # Without this, random init can push intensity to softplus(very_negative)≈0
         # and the gradient (sigmoid(very_negative)≈0) vanishes — unrecoverable.
         nn.init.zeros_(self.net[-1].weight)
-        bias = torch.zeros(6)
-        bias[2]  = 4.0   # light_pos z=4: on camera side (cameras are at radius ~4),
-        #                   so n·l > 0 for front-facing surfaces at init
-        bias[3:] = 2.0   # light_int → softplus(2) ≈ 2.1, gradient sigmoid(2) ≈ 0.88
+        bias = torch.zeros(9)
+        bias[2] = 4.0   # light_pos z: on camera side at init
+        bias[3:6] = 2.0   # point light → softplus(2) ≈ 2.1
+        bias[6:9] = 0.0   # ambient → softplus(0) ≈ 0.69 (gentle fill in shadows)
         self.net[-1].bias = nn.Parameter(bias)
 
     def forward(self, z: torch.Tensor):
-        out       = self.net(z)
+        out = self.net(z)
         light_pos = out[..., :3]
         # Avoid runaway highlights that can destabilize early optimization.
-        light_int = F.softplus(out[..., 3:]).clamp(max=20.0)
-        return light_pos, light_int
+        light_int = F.softplus(out[..., 3:6]).clamp(max=20.0)
+        ambient = F.softplus(out[..., 6:9]).clamp(max=10.0)
+        return light_pos, light_int, ambient

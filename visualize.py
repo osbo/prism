@@ -41,6 +41,14 @@ def to_uint8(t: torch.Tensor) -> np.ndarray:
     return (t.clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
 
 
+def color_to_uint8(color: torch.Tensor, opacity: torch.Tensor, alpha_thresh: float = 0.2) -> np.ndarray:
+    """Predicted RGB as uint8; pixels with opacity ≤ thresh are black (same FG rule as depth)."""
+    c = color.clamp(0, 1).cpu().numpy()
+    fg = (opacity.cpu().float().numpy() > alpha_thresh)[..., None]
+    c = np.where(fg, c, 0.0)
+    return (c * 255).astype(np.uint8)
+
+
 def depth_to_rgb(depth: torch.Tensor, opacity: torch.Tensor, alpha_thresh: float = 0.2) -> np.ndarray:
     """Visualize depth only on confident (non-background) pixels."""
     d = depth.cpu().float()
@@ -88,32 +96,46 @@ def mask_diff_rgb(gt_mask: np.ndarray, pred_mask: np.ndarray) -> np.ndarray:
     return out
 
 
-def make_panel_16x9(
-    images: list[np.ndarray],
-    labels: list[str],
-    out_w: int = 1600,
-    out_h: int = 900,
-    n_cols: int = 4,
-) -> Image.Image:
-    """Grid dashboard with target 16:9 output aspect."""
-    n = len(images)
-    n_rows = int(np.ceil(n / n_cols))
-    pad = 12
-    label_h = 24
-    cell_w = (out_w - pad * (n_cols + 1)) // n_cols
-    cell_h = (out_h - pad * (n_rows + 1)) // n_rows
-    img_h = max(1, cell_h - label_h)
+def compute_fg_mask(rgb_uint8: np.ndarray) -> np.ndarray:
+    """True = foreground. Background = dark pixels connected to the image border."""
+    dark = rgb_uint8.astype(np.int32).sum(-1) <= 10
+    try:
+        from scipy.ndimage import label as nd_label
+        labeled, _ = nd_label(dark)
+        border_lbls: set = set()
+        for arr in (labeled[0], labeled[-1], labeled[:, 0], labeled[:, -1]):
+            border_lbls.update(arr.tolist())
+        border_lbls.discard(0)
+        bg = np.zeros(dark.shape, dtype=bool)
+        for lbl in border_lbls:
+            bg |= labeled == lbl
+        return ~bg
+    except ImportError:
+        return ~dark
 
+
+def make_rows_grid(
+    rows: "list[list[np.ndarray]]",
+    labels: "list[list[str]]",
+    cell_w: int = 240,
+    label_h: int = 18,
+    pad: int = 6,
+) -> Image.Image:
+    """One row per view, fixed columns. Each cell is cell_w × cell_w pixels."""
+    n_rows = len(rows)
+    n_cols = max(len(r) for r in rows)
+    cell_h = cell_w
+    out_w = pad + n_cols * (cell_w + pad)
+    out_h = pad + n_rows * (cell_h + label_h + pad)
     canvas = Image.new("RGB", (out_w, out_h), color=(238, 238, 238))
     draw = ImageDraw.Draw(canvas)
-
-    for i, (arr, label) in enumerate(zip(images, labels)):
-        r, c = divmod(i, n_cols)
-        x0 = pad + c * (cell_w + pad)
-        y0 = pad + r * (cell_h + pad)
-        tile = Image.fromarray(arr).resize((cell_w, img_h), Image.Resampling.BILINEAR)
-        canvas.paste(tile, (x0, y0 + label_h))
-        draw.text((x0 + 4, y0 + 3), label, fill=(24, 24, 24))
+    for ri, (row_panels, row_lbls) in enumerate(zip(rows, labels)):
+        for ci, (arr, lbl) in enumerate(zip(row_panels, row_lbls)):
+            x0 = pad + ci * (cell_w + pad)
+            y0 = pad + ri * (cell_h + label_h + pad)
+            tile = Image.fromarray(arr).resize((cell_w, cell_h), Image.Resampling.BILINEAR)
+            canvas.paste(tile, (x0, y0 + label_h))
+            draw.text((x0 + 2, y0 + 2), lbl, fill=(24, 24, 24))
     return canvas
 
 
@@ -137,7 +159,7 @@ def visualize(
     model.load_state_dict(ckpt["model"], strict=False)
     model.eval()
 
-    test_ds = OmniObject3DDataset(cfg.data_root, split="test", image_size=cfg.image_size)
+    test_ds = OmniObject3DDataset(cfg.data_root, split="test", image_size=cfg.image_size, n_input_views=cfg.n_input_views)
     loader  = DataLoader(test_ds, batch_size=1, shuffle=False, num_workers=0)
     log.info("Rendering %d test objects → %s", len(test_ds), out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -146,14 +168,13 @@ def visualize(
         if n_objects and i >= n_objects:
             break
 
-        obj_id = batch["object_id"][0]
-        image  = batch["image"].to(device)
-        c2w    = batch["c2w"].to(device)
-        K      = batch["K"].to(device)
-        gt_mask = (batch["mask"][0, 0].cpu().numpy() > 0.5)
+        obj_id      = batch["object_id"][0]
+        images      = batch["images"].to(device)          # (1, N, 3, H, W)
+        input_c2ws  = batch["input_c2ws"].to(device)      # (1, N, 4, 4)
+        input_Ks    = batch["input_Ks"].to(device)        # (1, N, 3, 3)
+        N = images.shape[1]
 
-        log.info("Rendering %s …", obj_id)
-        rendered = model.render_image(image, c2w, K)
+        log.info("Rendering %s (%d views) …", obj_id, N)
 
         if export_mesh:
             mdir = mesh_dir if mesh_dir is not None else _default_mesh_dir(out_dir)
@@ -163,7 +184,7 @@ def visualize(
                 ext = "obj"
             mesh_path = mdir / f"{obj_id}.{ext}"
             with torch.no_grad():
-                z_latent = model.encoder(image)[0]
+                z_latent = model.encoder(images)[0]
             mc = extract_sdf_mesh(
                 model,
                 z_latent,
@@ -182,32 +203,34 @@ def visualize(
                 )
                 log.info("  saved mesh → %s (open in a 3D viewer extension)", mesh_path)
 
-        gt_rgb   = to_uint8(image[0].permute(1, 2, 0))
-        pred_rgb = to_uint8(rendered["color"])
-        pred_d   = depth_to_rgb(rendered["depth"], rendered["opacity"], alpha_thresh=alpha_thresh)
-        pred_n   = normal_to_rgb(rendered["normal"], rendered["opacity"], alpha_thresh=alpha_thresh)
-        pred_o   = opacity_to_rgb(rendered["opacity"])
-        pred_mask = (rendered["opacity"].cpu().numpy() > alpha_thresh)
-        gt_mask_rgb = mask_to_rgb(gt_mask)
-        pred_mask_rgb = mask_to_rgb(pred_mask)
-        sep_rgb = mask_diff_rgb(gt_mask, pred_mask)
+        # One row per input view: GT image | GT mask | pred color | pred opacity | pred depth | mask diff
+        grid_rows:  list[list[np.ndarray]] = []
+        grid_labels: list[list[str]] = []
+        for vi in range(N):
+            gt_rgb  = to_uint8(images[0, vi].permute(1, 2, 0))
+            gt_mask = compute_fg_mask(gt_rgb)
+            gt_mask_rgb = mask_to_rgb(gt_mask)
 
-        # Black where GT marks background (same silhouette assumption as mesh carving).
-        pred_on_gt_mask = pred_rgb.copy()
-        pred_on_gt_mask[~gt_mask] = 0
-        pred_bg = pred_rgb.copy()
-        pred_bg[gt_mask] = 0
+            view_c2w = input_c2ws[:, vi]   # (1, 4, 4)
+            view_K   = input_Ks[:, vi]     # (1, 3, 3)
+            with torch.no_grad():
+                r = model.render_image(images, view_c2w, view_K)
 
-        panel = make_panel_16x9(
-            [
-                gt_rgb, gt_mask_rgb, pred_rgb, pred_o,
-                pred_on_gt_mask, pred_bg, pred_d, sep_rgb,
-            ],
-            [
-                "GT image", "GT object mask", "Predicted color", "Predicted opacity",
-                "Pred (GT mask, bg=black)", "Pred on GT bg only", "Pred depth (FG)", "Mask diff TP/FP/FN",
-            ],
-        )
+            pred_rgb  = color_to_uint8(r["color"], r["opacity"], alpha_thresh=alpha_thresh)
+            pred_op   = opacity_to_rgb(r["opacity"])
+            pred_d    = depth_to_rgb(r["depth"], r["opacity"], alpha_thresh=alpha_thresh)
+            pred_mask = r["opacity"].cpu().numpy() > alpha_thresh
+            diff      = mask_diff_rgb(gt_mask, pred_mask)
+
+            tag = f"v{vi}"
+            grid_rows.append([gt_rgb, gt_mask_rgb, pred_rgb, pred_op, pred_d, diff])
+            grid_labels.append([
+                f"{tag} GT", f"{tag} mask",
+                f"{tag} pred", f"{tag} opacity",
+                f"{tag} depth", f"{tag} diff",
+            ])
+
+        panel = make_rows_grid(grid_rows, grid_labels)
         panel.save(out_dir / f"{obj_id}.png")
         log.info("  saved %s", out_dir / f"{obj_id}.png")
 

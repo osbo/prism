@@ -69,7 +69,7 @@ def evaluate(cfg: PRISMConfig, n_objects=None):
     model.load_state_dict(ckpt["model"], strict=False)
     model.eval()
 
-    test_ds = OmniObject3DDataset(cfg.data_root, split="test", image_size=cfg.image_size)
+    test_ds = OmniObject3DDataset(cfg.data_root, split="test", image_size=cfg.image_size, n_input_views=cfg.n_input_views)
     loader  = DataLoader(test_ds, batch_size=1, shuffle=False, num_workers=0)
     n_split = len(test_ds)
     n_run = min(n_split, n_objects) if n_objects is not None else n_split
@@ -84,11 +84,11 @@ def evaluate(cfg: PRISMConfig, n_objects=None):
             break
 
         obj_id    = batch["object_id"][0]
-        image     = batch["image"].to(device)
+        images    = batch["images"].to(device)
         mesh_path = batch["mesh_path"][0]
 
         with torch.no_grad():
-            z = model.encoder(image)
+            z = model.encoder(images)
 
         mc = extract_sdf_mesh(
             model,

@@ -55,7 +55,7 @@ def validate(model, loader, device):
     total, n = 0.0, 0
     for batch in loader:
         losses = model(
-            batch["image"].to(device),
+            batch["images"].to(device),
             batch["c2w"].to(device),
             batch["K"].to(device),
             batch["depth"].to(device),
@@ -84,8 +84,8 @@ def train(cfg: PRISMConfig, resume_path: str | None = None):
     ], weight_decay=cfg.weight_decay)
     scaler = GradScaler("cuda", enabled=(device.type == "cuda"))
 
-    train_ds = OmniObject3DDataset(cfg.data_root, split="train", image_size=cfg.image_size)
-    val_ds   = OmniObject3DDataset(cfg.data_root, split="val",   image_size=cfg.image_size)
+    train_ds = OmniObject3DDataset(cfg.data_root, split="train", image_size=cfg.image_size, n_input_views=cfg.n_input_views)
+    val_ds   = OmniObject3DDataset(cfg.data_root, split="val",   image_size=cfg.image_size, n_input_views=cfg.n_input_views)
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True,
                               num_workers=cfg.num_workers, pin_memory=True, drop_last=True,
                               persistent_workers=cfg.num_workers > 0)
@@ -118,7 +118,7 @@ def train(cfg: PRISMConfig, resume_path: str | None = None):
             for pg in opt.param_groups:
                 pg["lr"] = pg["initial_lr"] * scale
 
-            image  = batch["image"].to(device, non_blocking=True)
+            images = batch["images"].to(device, non_blocking=True)
             depth  = batch["depth"].to(device, non_blocking=True)
             normal = batch["normal"].to(device, non_blocking=True)
             mask   = batch["mask"].to(device, non_blocking=True)
@@ -127,7 +127,7 @@ def train(cfg: PRISMConfig, resume_path: str | None = None):
 
             opt.zero_grad(set_to_none=True)
             with autocast("cuda", enabled=(device.type == "cuda")):
-                losses = model(image, c2w, K, depth, normal, gt_mask=mask)
+                losses = model(images, c2w, K, depth, normal, gt_mask=mask)
 
             loss = losses["total"]
             if not torch.isfinite(loss).all():
@@ -160,20 +160,17 @@ def train(cfg: PRISMConfig, resume_path: str | None = None):
                 )
                 t_prev = t_now
                 log.info(
-                    "[%d/%d] step=%d  total=%.4f  render=%.4f  render_bg=%.4f  depth=%.4f  "
-                    "normal=%.4f  eik=%.4f  sdf0=%.4f  sdf_sign=%.4f  bg_sdf=%.4f  occ=%.4f  "
-                    "sil_bce=%.4f  sil_dice=%.4f  bg_inf=%.4f  lface=%.4f  close=%.4f  β=%.3f  lr=%.1e  %s",
+                    "[%d/%d] step=%d  total=%.4f  render=%.4f  depth=%.4f  "
+                    "normal=%.4f  eik=%.4f  sdf0=%.4f  sdf_sign=%.4f  bg_sdf=%.4f  "
+                    "sil_bce=%.4f  sil_dice=%.4f  lface=%.4f  close=%.4f  β=%.3f  lr=%.1e  %s",
                     epoch, end_epoch, step,
                     losses["total"].item(), losses["render"].item(),
-                    losses["render_bg"].item(),
                     losses["depth"].item(), losses["normal"].item(),
                     losses["eikonal"].item(),
                     losses["sdf_surface"].item(), losses["sdf_sign"].item(),
                     losses["bg_sdf"].item(),
-                    losses["opacity"].item(),
                     losses["sil_bce"].item(),
                     losses["sil_dice"].item(),
-                    losses["bg_inf"].item(),
                     losses["light_facing"].item(),
                     losses["closure"].item(),
                     model.beta.item(),
