@@ -6,7 +6,7 @@ Forward pass (training):
   2. Sample n_rays pixels; build world-space rays from (c2w, K)
   3. Stratified sampling along each ray → 3D points
   4. SDF MLP(pts, z) → SDF values + gradient (via autograd)
-  5. NeuS weights(SDF) → expected depth, normal, surface point
+  5. NeuS weights(SDF) → depth (conditional mean if w_sum above thresh else far), normal, surface point
   6. BRDF head(z) → albedo, roughness, metalness
   7. Light head(z) → light_pos, light_intensity
   8. Cook-Torrance GGX → predicted pixel color
@@ -16,6 +16,7 @@ Forward pass (training):
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.amp import autocast
 
 from .encoder  import ImageEncoder
 from .sdf_mlp  import SDFMLP
@@ -29,7 +30,8 @@ class PRISM(nn.Module):
         ld = cfg.latent_dim
         self.encoder    = ImageEncoder(latent_dim=ld, pretrained=cfg.pretrained_encoder)
         self.sdf_mlp    = SDFMLP(latent_dim=ld, hidden=cfg.sdf_hidden,
-                                 n_layers=cfg.sdf_layers, n_freqs=cfg.n_freqs)
+                                 n_layers=cfg.sdf_layers, n_freqs=cfg.n_freqs,
+                                 sphere_init_radius=cfg.sdf_init_radius)
         self.brdf_head  = BRDFHead(latent_dim=ld)
         self.light_head = LightHead(latent_dim=ld)
         # NeuS β: controls surface sharpness.  Learned; started soft, sharpens during training.
@@ -38,7 +40,8 @@ class PRISM(nn.Module):
 
     @property
     def beta(self):
-        return self.log_beta.exp().clamp(min=self.cfg.beta_min)
+        # Clamp log-domain first to prevent exp overflow -> inf -> NaNs downstream.
+        return self.log_beta.clamp(-10.0, 6.0).exp().clamp(min=self.cfg.beta_min)
 
     # ------------------------------------------------------------------
     # Training forward
@@ -56,7 +59,14 @@ class PRISM(nn.Module):
         B, _, H, W = image.shape
         device = image.device
 
-        z = self.encoder(image)   # (B, latent_dim)
+        # Encoder only under AMP — SDF + positional encoding + ∇SDF need fp32 to avoid
+        # overflow / NaNs when autocast uses fp16 (especially with create_graph=True).
+        if device.type == "cuda":
+            with autocast("cuda", enabled=True):
+                z = self.encoder(image)   # (B, latent_dim)
+        else:
+            z = self.encoder(image)
+        z_fp32 = z.float()
 
         # ---- Sample rays -----------------------------------------------
         rays_o, rays_d, pix_rc, bidx = sample_rays(
@@ -75,19 +85,24 @@ class PRISM(nn.Module):
 
         pts = rays_o[:, None] + t_vals[:, :, None] * rays_d[:, None]  # (N, n_samples, 3)
 
-        z_rays = z[bidx]                                      # (N, latent_dim)
+        z_rays = z_fp32[bidx]                                      # (N, latent_dim)
         z_pts  = z_rays[:, None].expand(-1, cfg.n_samples, -1).reshape(-1, z.shape[-1])
 
         # ---- SDF + gradient (create_graph for eikonal BP) --------------
-        pts_flat = pts.reshape(-1, 3).requires_grad_(True)
-        sdf_flat = self.sdf_mlp(pts_flat, z_pts).squeeze(-1)  # (N*n_samples,)
+        with autocast("cuda", enabled=False):
+            pts_flat = pts.reshape(-1, 3).detach().requires_grad_(True)
+            sdf_flat = self.sdf_mlp(pts_flat, z_pts).squeeze(-1)
+            # Keep logits bounded before sigmoid in NeuS (still differentiable).
+            lim = cfg.sdf_clamp
+            sdf_flat = sdf_flat.clamp(-lim, lim)
 
-        sdf_grad = torch.autograd.grad(
-            sdf_flat, pts_flat,
-            grad_outputs=torch.ones_like(sdf_flat),
-            create_graph=self.training,
-            retain_graph=True,
-        )[0]                                                   # (N*n_samples, 3)
+            sdf_grad = torch.autograd.grad(
+                sdf_flat,
+                pts_flat,
+                grad_outputs=torch.ones_like(sdf_flat),
+                create_graph=self.training,
+                retain_graph=True,
+            )[0]
 
         sdf_vals = sdf_flat.reshape(N, cfg.n_samples)
         normals  = sdf_grad.reshape(N, cfg.n_samples, 3)
@@ -95,19 +110,37 @@ class PRISM(nn.Module):
         # ---- NeuS weights → depth, normal, surface point ---------------
         # Keep SDF attached so render/depth/normal losses can shape geometry.
         # Detaching here makes SDF learn only from eikonal regularization.
-        weights     = neus_weights(sdf_vals, self.beta)  # (N, n_samples)
-        pred_depth  = (weights * t_vals).sum(-1)                  # (N,)
-        pred_normal = F.normalize(
-            (weights[:, :, None] * normals).sum(1), dim=-1
-        )                                                          # (N, 3)
+        beta_v = self.beta.float().clamp(min=float(cfg.beta_min))
+        weights = neus_weights(sdf_vals, beta_v)  # (N, n_samples)
+        w_sum = weights.sum(-1)
+        hit = w_sum > cfg.depth_hit_w_sum_thresh
+        # No compositing with a far-plane constant: either there is mass along the ray
+        # (depth = conditional mean) or the ray is treated as empty (depth = far).
+        w_safe = w_sum.clamp(min=1e-8)
+        pred_depth = torch.where(
+            hit,
+            (weights * t_vals).sum(-1) / w_safe,
+            torch.full_like(w_sum, far),
+        )
+        acc_n = (weights[:, :, None] * normals).sum(1)
+        pred_normal = torch.where(
+            hit[:, None],
+            F.normalize(acc_n, dim=-1, eps=1e-6),
+            F.normalize(-rays_d, dim=-1, eps=1e-6),
+        )
         # Keep training-time shading stable by orienting normals toward camera.
         view_dot = (pred_normal * (-rays_d)).sum(-1, keepdim=True)
         pred_normal = torch.where(view_dot < 0, -pred_normal, pred_normal)
         x_surf = rays_o + pred_depth[:, None] * rays_d            # (N, 3)
 
         # ---- BRDF + light ----------------------------------------------
-        albedo, roughness, metalness = self.brdf_head(z_rays)     # (N, 3/1/1)
-        light_pos, light_int         = self.light_head(z_rays)    # (N, 3/3)
+        if device.type == "cuda":
+            with autocast("cuda", enabled=True):
+                albedo, roughness, metalness = self.brdf_head(z_rays)     # (N, 3/1/1)
+                light_pos, light_int         = self.light_head(z_rays)    # (N, 3/3)
+        else:
+            albedo, roughness, metalness = self.brdf_head(z_rays)
+            light_pos, light_int         = self.light_head(z_rays)
 
         l_dir = F.normalize(light_pos - x_surf, dim=-1)
         v_dir = F.normalize(-rays_d, dim=-1)
@@ -131,10 +164,10 @@ class PRISM(nn.Module):
         # fg: foreground pixels — use GT mask when available (exact alpha/threshold),
         # otherwise fall back to the depth-bounds proxy.
         if gt_mask is not None:
-            fg = gt_mask[:, 0][bidx, r, c].bool()
+            fg = gt_mask[:, 0][bidx, r, c] > 0.5
         else:
             fg = (gt_d > near) & (gt_d < far)
-        bg_d    = ~fg
+        bg = ~fg
         valid_d = fg & (gt_d > near) & (gt_d < far)   # fg pixels with usable depth
 
         # Push light to illuminated side; when n·l ≤ 0, BRDF=0 and all render gradients vanish.
@@ -148,12 +181,8 @@ class PRISM(nn.Module):
             if fg.any()
             else pred_color.sum() * 0.0
         )
-        # Weak background RGB supervision suppresses floating "ghost geometry".
-        l_render_bg = (
-            F.l1_loss(pred_color[bg_d], gt_color[bg_d])
-            if bg_d.any()
-            else pred_color.sum() * 0.0
-        )
+        # Object-only optimization: ignore background RGB.
+        l_render_bg = pred_color.sum() * 0.0
         l_render = l_render_obj
 
         # Depth loss — valid GT only. Use metric-space L1 directly so large
@@ -163,18 +192,13 @@ class PRISM(nn.Module):
         else:
             l_depth = pred_depth.sum() * 0.0
 
-        # Background SDF constraint: rays without valid GT depth should stay
-        # outside (positive SDF) near and far, preventing fog-like occupancy.
-        if bg_d.any():
-            sdf_bg_near = sdf_vals[bg_d, 0]
-            sdf_bg_far = sdf_vals[bg_d, -1]
-            l_bg_sdf = F.softplus(-sdf_bg_near).mean() + F.softplus(-sdf_bg_far).mean()
+        # Background rays are known empty from mask: keep SDF positive along the full ray.
+        if bg.any():
+            l_bg_sdf = F.softplus(cfg.bg_sdf_margin - sdf_vals[bg]).mean()
         else:
             l_bg_sdf = sdf_vals.sum() * 0.0
 
-        # Opacity supervision from depth validity.
-        # For object pixels, accumulated weight should be high; for background, low.
-        w_sum = weights.sum(-1)
+        # Opacity supervision from mask: object rays high mass, background rays low mass.
         w_prob = w_sum.clamp(1e-4, 1 - 1e-4)
         w_logit = torch.log(w_prob) - torch.log1p(-w_prob)
         if fg.any():
@@ -184,14 +208,27 @@ class PRISM(nn.Module):
             )
         else:
             l_occ_fg = w_sum.sum() * 0.0
-        if bg_d.any():
+        if bg.any():
             l_occ_bg = F.binary_cross_entropy_with_logits(
-                w_logit[bg_d],
-                torch.zeros_like(w_sum[bg_d]),
+                w_logit[bg],
+                torch.zeros_like(w_sum[bg]),
             )
         else:
             l_occ_bg = w_sum.sum() * 0.0
         l_opacity = l_occ_fg + l_occ_bg
+
+        # Silhouette losses on sampled rays (mask-driven contour shaping).
+        gt_fg = fg.float()
+        l_sil_bce = F.binary_cross_entropy_with_logits(w_logit, gt_fg)
+        inter = (w_prob * gt_fg).sum()
+        dice = (2.0 * inter + 1e-6) / (w_prob.sum() + gt_fg.sum() + 1e-6)
+        l_sil_dice = 1.0 - dice
+
+        # Known-background rays: depth should be far (pred_depth already uses far when empty).
+        if bg.any():
+            l_bg_inf = F.l1_loss(pred_depth[bg], torch.full_like(pred_depth[bg], far))
+        else:
+            l_bg_inf = pred_depth.sum() * 0.0
 
         # SDF supervision from GT depth:
         #  - SDF(x(gt_depth)) ≈ 0
@@ -232,13 +269,31 @@ class PRISM(nn.Module):
         valid_n = gt_n.norm(dim=-1) > 0.5
         if valid_n.any():
             pn, gn = pred_normal[valid_n], gt_n[valid_n]
+            pn = F.normalize(pn, dim=-1, eps=1e-6)
+            gn = F.normalize(gn, dim=-1, eps=1e-6)
             # Sign-invariant cosine handles possible normal convention mismatch.
             l_normal = (1.0 - F.cosine_similarity(pn, gn, dim=-1).abs()).mean()
         else:
             l_normal = pred_normal.sum() * 0.0
 
-        # Eikonal loss — ||∇f|| = 1
-        l_eikonal = ((sdf_grad.norm(dim=-1) - 1.0) ** 2).mean()
+        # Eikonal loss — ||∇f|| = 1 (cap extreme norms so late-training spikes don't explode)
+        gnrm = sdf_grad.norm(dim=-1)
+        l_eikonal = ((gnrm.clamp(max=100.0) - 1.0) ** 2).mean()
+
+        # Closure prior (lightweight): keep center inside and far boundary outside.
+        with autocast("cuda", enabled=False):
+            c_pts = torch.zeros(B, 3, device=device, dtype=torch.float32)
+            c_sdf = self.sdf_mlp(c_pts, z_fp32).squeeze(-1)
+            l_center_inside = F.softplus(c_sdf + cfg.closure_center_margin).mean()
+
+            n_b = 64
+            d = torch.randn(B, n_b, 3, device=device, dtype=torch.float32)
+            d = F.normalize(d, dim=-1, eps=1e-6)
+            b_pts = d * cfg.mc_bound
+            zb = z_fp32[:, None, :].expand(-1, n_b, -1).reshape(-1, z_fp32.shape[-1])
+            b_sdf = self.sdf_mlp(b_pts.reshape(-1, 3), zb).squeeze(-1)
+            l_boundary_outside = F.softplus(cfg.closure_boundary_margin - b_sdf).mean()
+        l_closure = l_center_inside + l_boundary_outside
 
         total = (
             cfg.lambda_render   * l_render
@@ -250,7 +305,11 @@ class PRISM(nn.Module):
             + cfg.lambda_sdf_surface * l_sdf_surface
             + cfg.lambda_sdf_sign    * l_sdf_sign
             + cfg.lambda_opacity     * l_opacity
+            + cfg.lambda_sil_bce     * l_sil_bce
+            + cfg.lambda_sil_dice    * l_sil_dice
+            + cfg.lambda_bg_inf      * l_bg_inf
             + cfg.lambda_light_facing * l_light_facing
+            + cfg.lambda_closure     * l_closure
         )
         return {
             "total":    total,
@@ -263,7 +322,11 @@ class PRISM(nn.Module):
             "sdf_surface": l_sdf_surface.detach(),
             "sdf_sign": l_sdf_sign.detach(),
             "opacity": l_opacity.detach(),
+            "sil_bce": l_sil_bce.detach(),
+            "sil_dice": l_sil_dice.detach(),
+            "bg_inf": l_bg_inf.detach(),
             "light_facing": l_light_facing.detach(),
+            "closure": l_closure.detach(),
         }
 
     # ------------------------------------------------------------------
@@ -333,13 +396,17 @@ class PRISM(nn.Module):
 
             w  = neus_weights(sf.detach(), self.beta)
             w_sum = w.sum(-1)
-            # Use the dominant surface sample for crisp inference maps.
-            # (Expected-value integration is useful for training but often
-            # produces streaky depth/normal visualizations at test time.)
+            hit = w_sum > cfg.depth_hit_w_sum_thresh
+            # Dominant-bin depth when there is real mass; otherwise far (no spurious sheet).
             k = w.argmax(dim=-1)  # (n,)
             ridx = torch.arange(n, device=device)
-            d = t[ridx, k]
-            nm = F.normalize(g[ridx, k], dim=-1)
+            d = torch.where(hit, t[ridx, k], torch.full((n,), far, device=device, dtype=t.dtype))
+            nm_hit = F.normalize(g[ridx, k], dim=-1)
+            nm = torch.where(
+                hit[:, None],
+                nm_hit,
+                F.normalize(-rd, dim=-1, eps=1e-6),
+            )
             # Orient normals toward the camera for stable visualisation.
             view_dot = (nm * (-rd)).sum(-1, keepdim=True)
             nm = torch.where(view_dot < 0, -nm, nm)

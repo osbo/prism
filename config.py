@@ -13,13 +13,20 @@ class PRISMConfig:
     pretrained_encoder: bool = True
     sdf_hidden:        int   = 256
     sdf_layers:        int   = 8
-    n_freqs:           int   = 2    # Fourier positional encoding frequencies (high values → checkerboard)
+    n_freqs:           int   = 4    # Fourier positional encoding frequencies (high values → checkerboard)
+    # Sphere initialization (not a structural restriction).
+    sdf_init_radius:   float = 0.35
 
     # Rendering
     n_rays:    int   = 256          # rays sampled per image per training step
     n_samples: int   = 64           # samples along each ray
     near:      float = 0.5
     far:       float = 6.0
+    # Depth / inference: no surface mass along the ray → depth clamped to far
+    # (avoids picking a spurious bin when weights are noise).
+    depth_hit_w_sum_thresh: float = 0.05
+    # Hard clamp raw SDF logits before NeuS sigmoid (fp32 path; improves AMP stability).
+    sdf_clamp: float = 80.0
 
     # Loss weights
     lambda_render: float = 1.0
@@ -29,14 +36,23 @@ class PRISMConfig:
     # Direct SDF supervision from GT depth (prevents all-negative saturation collapse)
     lambda_sdf_surface: float = 0.20
     lambda_sdf_sign:    float = 0.02
+    # Closure priors: keep origin inside and boundary outside.
+    lambda_closure:     float = 0.01
+    closure_center_margin: float = 0.05
+    closure_boundary_margin: float = 0.05
     # Opacity supervision from GT depth validity:
     # object pixels should accumulate mass, background should remain empty.
     lambda_opacity:     float = 1.0
-    # Keep photometric supervision on background to suppress "hallucinated" surfaces.
-    lambda_bg_render:   float = 0.20
+    # Background constraints from mask (outside object should stay empty).
+    lambda_bg_render:   float = 0.0
     lambda_bg_sdf:      float = 0.20
+    lambda_bg_inf:      float = 0.50
+    bg_sdf_margin:      float = 0.02
+    # Silhouette matching (sampled rays): drives object contour away from spherical blob.
+    lambda_sil_bce:     float = 2.0
+    lambda_sil_dice:    float = 0.5
     # Prevent NeuS sharpness from collapsing to overly brittle values.
-    beta_min:           float = 0.50
+    beta_min:           float = 0.30
 
     # Training
     n_epochs:       int   = 100
@@ -51,10 +67,18 @@ class PRISMConfig:
     save_every:     int   = 5       # epochs — periodic checkpoint
     eval_every:     int   = 5       # epochs — val + best-on-val (same cadence)
 
-    # Evaluation
-    mc_resolution: int   = 128      # marching cubes grid resolution
+    # Evaluation / mesh export
+    # Higher resolution reduces axis-aligned marching-cubes stairsteps on curved surfaces.
+    mc_resolution: int   = 192      # was 128; ↑ for smoother meshes (slower ~ (res/128)³)
     mc_threshold:  float = 0.0
     mc_bound:      float = 2.5      # [-bound, bound]^3 for marching cubes
+    # If True: push SDF outside where grid points project to GT background (view-conditioned).
+    # Set False to export raw marching cubes without mask carve.
+    mc_carve_background: bool = True
+    mc_carve_sdf_min: float = 0.35   # carved voxels: max(sdf, this) so iso=0 surface cannot pass there
+    mc_keep_largest_component: bool = True
+    # Blur GT mask before carving + soft blend (reduces harsh voxel-aligned “steps” at carve boundary).
+    mc_carve_mask_blur_radius: int = 2   # 0 = hard silhouette (more stairsteps); 2 ≈ 5×5 Gaussian
 
     # Light-facing penalty: push n·l > 0 so render loss provides non-zero gradients.
     lambda_light_facing: float = 0.2

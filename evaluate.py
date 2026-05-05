@@ -15,50 +15,13 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from config import PRISMConfig
-from prism  import PRISM
+from prism import PRISM
+from prism.mesh_extract import extract_sdf_mesh
 from data.omniobject3d import OmniObject3DDataset
 
 log = logging.getLogger("evaluate")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s",
                     datefmt="%H:%M:%S")
-
-
-# ---------------------------------------------------------------------------
-# Marching cubes mesh extraction
-# ---------------------------------------------------------------------------
-
-def extract_mesh(model, z, cfg, device):
-    """Marching cubes over a uniform grid in [-bound, bound]^3."""
-    try:
-        from skimage.measure import marching_cubes
-    except ImportError:
-        raise ImportError("pip install scikit-image")
-
-    res   = cfg.mc_resolution
-    bound = cfg.mc_bound
-    lin   = torch.linspace(-bound, bound, res, device=device)
-    gx, gy, gz = torch.meshgrid(lin, lin, lin, indexing="ij")   # (res, res, res)
-    pts   = torch.stack([gx, gy, gz], dim=-1).reshape(-1, 3)
-
-    chunk    = 32768
-    sdf_vals = []
-    z_single = z.unsqueeze(0).expand(chunk, -1)
-
-    with torch.no_grad():
-        for i in range(0, pts.shape[0], chunk):
-            p  = pts[i:i+chunk]
-            zc = z_single[:p.shape[0]]
-            sdf_vals.append(model.sdf_mlp(p, zc).squeeze(-1))
-
-    sdf_grid = torch.cat(sdf_vals).reshape(res, res, res).cpu().numpy()
-
-    if sdf_grid.min() >= cfg.mc_threshold or sdf_grid.max() <= cfg.mc_threshold:
-        return None
-
-    verts, faces, *_ = marching_cubes(sdf_grid, level=cfg.mc_threshold)
-    # Map from grid coords [0, res-1] to world coords [-bound, bound]
-    verts = verts / (res - 1) * (2 * bound) - bound
-    return verts.astype(np.float32), faces
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +90,15 @@ def evaluate(cfg: PRISMConfig, n_objects=None):
         with torch.no_grad():
             z = model.encoder(image)
 
-        mc = extract_mesh(model, z[0], cfg, device)
+        mc = extract_sdf_mesh(
+            model,
+            z[0],
+            cfg,
+            device,
+            mask_hw=batch["mask"][0],
+            c2w=batch["c2w"].to(device),
+            K=batch["K"].to(device),
+        )
         if mc is None:
             log.warning("No surface found for %s — skipping", obj_id)
             continue
@@ -182,7 +153,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_root",  type=str)
     parser.add_argument("--checkpoint", type=str)
-    parser.add_argument("--n_objects",  type=int)
+    parser.add_argument("--n_objects",  type=int, default=1)
     parser.add_argument("--image_size", type=int)
     args = parser.parse_args()
 

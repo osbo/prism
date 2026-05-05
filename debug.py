@@ -281,7 +281,7 @@ def action_plan(all_metrics, cfg):
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-def run_debug(cfg, n_objects=3):
+def run_debug(cfg, n_objects=1):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = PRISM(cfg).to(device)
     ckpt  = torch.load(cfg.checkpoint, map_location="cpu", weights_only=True)
@@ -363,7 +363,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", type=str)
     parser.add_argument("--data_root",  type=str)
     parser.add_argument("--image_size", type=int)
-    parser.add_argument("--n_objects",  type=int, default=3)
+    parser.add_argument("--n_objects",  type=int, default=1)
     args = parser.parse_args()
     cfg = PRISMConfig()
     for k in ("checkpoint", "data_root", "image_size"):

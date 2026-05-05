@@ -20,7 +20,8 @@ class SDFMLP(nn.Module):
     """
 
     def __init__(self, latent_dim: int = 128, hidden: int = 256,
-                 n_layers: int = 8, n_freqs: int = 6):
+                 n_layers: int = 8, n_freqs: int = 6,
+                 sphere_init_radius: float = 0.35):
         super().__init__()
         enc_dim = 3 + 2 * n_freqs * 3   # fourier(x)
         in_dim  = enc_dim + latent_dim
@@ -37,6 +38,14 @@ class SDFMLP(nn.Module):
         self.out    = nn.Linear(hidden, 1)
         self.skip   = skip
         self.n_freqs = n_freqs
+        self.sphere_init_radius = float(sphere_init_radius)
+
+        # Sphere-oriented initialization, but unconstrained thereafter:
+        # f(x) = a*||x|| + b + MLP(...), with a=1, b=-r0 at init.
+        self.sphere_scale = nn.Parameter(torch.tensor(1.0))
+        self.sphere_bias = nn.Parameter(torch.tensor(-self.sphere_init_radius))
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
 
     def forward(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         """x: (..., 3), z: (..., latent_dim) → (..., 1)"""
@@ -46,4 +55,5 @@ class SDFMLP(nn.Module):
             if i == self.skip:
                 h = torch.cat([h, inp], dim=-1)
             h = F.relu(layer(h))
-        return self.out(h)
+        r = x.norm(dim=-1, keepdim=True)
+        return self.out(h) + self.sphere_scale * r + self.sphere_bias

@@ -129,11 +129,29 @@ def train(cfg: PRISMConfig, resume_path: str | None = None):
             with autocast("cuda", enabled=(device.type == "cuda")):
                 losses = model(image, c2w, K, depth, normal, gt_mask=mask)
 
-            scaler.scale(losses["total"]).backward()
+            loss = losses["total"]
+            if not torch.isfinite(loss).all():
+                log.warning("non-finite loss at step %d — skipping batch", step)
+                scaler.update()
+                step += 1
+                continue
+
+            scaler.scale(loss).backward()
             scaler.unscale_(opt)
-            nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+            gn = nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+            if not torch.isfinite(torch.as_tensor(gn, device=device)):
+                log.warning("non-finite grad norm at step %d — skipping optimizer step", step)
+                scaler.update()
+                step += 1
+                continue
+
             scaler.step(opt)
             scaler.update()
+
+            with torch.no_grad():
+                if not torch.isfinite(model.log_beta):
+                    model.log_beta.zero_()
+                model.log_beta.clamp_(-10.0, 6.0)
 
             if step % cfg.log_every == 0:
                 t_now = time.perf_counter()
@@ -144,7 +162,7 @@ def train(cfg: PRISMConfig, resume_path: str | None = None):
                 log.info(
                     "[%d/%d] step=%d  total=%.4f  render=%.4f  render_bg=%.4f  depth=%.4f  "
                     "normal=%.4f  eik=%.4f  sdf0=%.4f  sdf_sign=%.4f  bg_sdf=%.4f  occ=%.4f  "
-                    "lface=%.4f  β=%.3f  lr=%.1e  %s",
+                    "sil_bce=%.4f  sil_dice=%.4f  bg_inf=%.4f  lface=%.4f  close=%.4f  β=%.3f  lr=%.1e  %s",
                     epoch, end_epoch, step,
                     losses["total"].item(), losses["render"].item(),
                     losses["render_bg"].item(),
@@ -153,7 +171,11 @@ def train(cfg: PRISMConfig, resume_path: str | None = None):
                     losses["sdf_surface"].item(), losses["sdf_sign"].item(),
                     losses["bg_sdf"].item(),
                     losses["opacity"].item(),
+                    losses["sil_bce"].item(),
+                    losses["sil_dice"].item(),
+                    losses["bg_inf"].item(),
                     losses["light_facing"].item(),
+                    losses["closure"].item(),
                     model.beta.item(),
                     opt.param_groups[1]["lr"],
                     (f"{ms_per_step:.1f}ms/step" if step > 0 else "—"),

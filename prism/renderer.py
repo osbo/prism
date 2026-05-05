@@ -62,15 +62,18 @@ def neus_weights(sdf: torch.Tensor, beta: torch.Tensor) -> torch.Tensor:
     beta: scalar               — surface sharpness (learned)
     Returns weights (N_rays, N_samples) that peak at the zero-crossing.
     """
+    beta = beta.clamp_min(1e-6)
     # Φ_s(x) = sigmoid(+x/β)  — NeuS eq.13; high outside (sdf>0), low inside (sdf<0).
     # Along a ray from outside→inside, sdf decreases → Φ decreases → α > 0.
     phi      = torch.sigmoid(sdf / beta)
     phi_next = torch.cat([phi[:, 1:], phi[:, -1:]], dim=1)
     # α_i = max(Φ(s_i) − Φ(s_{i+1}), 0) / Φ(s_i)
     alpha = ((phi - phi_next) / (phi + 1e-6)).clamp(0.0, 1.0)
+    alpha = torch.nan_to_num(alpha, nan=0.0, posinf=1.0, neginf=0.0)
     # T_i = ∏_{j<i}(1 − α_j)
     T = torch.cumprod(
         torch.cat([torch.ones_like(alpha[:, :1]), 1.0 - alpha[:, :-1]], dim=1),
         dim=1,
     )
-    return T * alpha  # (N_rays, N_samples)
+    w = T * alpha
+    return torch.nan_to_num(w, nan=0.0, posinf=0.0, neginf=0.0)  # (N_rays, N_samples)

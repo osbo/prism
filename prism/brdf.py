@@ -15,7 +15,7 @@ def cook_torrance_ggx(
     light_intensity: torch.Tensor,  # (..., 3)
 ) -> torch.Tensor:
     """Cook-Torrance GGX BRDF × incoming radiance.  Returns (..., 3) RGB."""
-    h   = F.normalize(v + l, dim=-1)
+    h   = F.normalize(v + l, dim=-1, eps=EPS)
     ndl = (n * l).sum(-1, keepdim=True)                   # can be ≤ 0 (back-face)
     ndv = (n * v).sum(-1, keepdim=True).clamp(EPS, 1.0)
     ndh = (n * h).sum(-1, keepdim=True).clamp(EPS, 1.0)
@@ -38,7 +38,8 @@ def cook_torrance_ggx(
     specular = D * Fr * G / (4.0 * ndv * ndl.clamp(EPS, 1.0) + EPS)
     diffuse  = (albedo / torch.pi) * (1.0 - metalness) * (1.0 - Fr)
 
-    return ((diffuse + specular) * light_intensity * ndl.clamp(min=0.0)).clamp(0.0, 1.0)
+    out = ((diffuse + specular) * light_intensity * ndl.clamp(min=0.0)).clamp(0.0, 1.0)
+    return torch.nan_to_num(out, nan=0.0, posinf=1.0, neginf=0.0)
 
 
 class BRDFHead(nn.Module):
@@ -89,5 +90,6 @@ class LightHead(nn.Module):
     def forward(self, z: torch.Tensor):
         out       = self.net(z)
         light_pos = out[..., :3]
-        light_int = F.softplus(out[..., 3:])
+        # Avoid runaway highlights that can destabilize early optimization.
+        light_int = F.softplus(out[..., 3:]).clamp(max=20.0)
         return light_pos, light_int
