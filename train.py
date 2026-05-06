@@ -1,5 +1,6 @@
 """
 python train.py [--data_root ...] [--batch_size N] [--n_epochs N]
+python train.py --overfit   # single-object memorization (many random views / step; see PRISMConfig overfit_*)
 
 Checkpointing:
   • By default, **does not** load ``model.pt`` even if it exists: fresh weights,
@@ -21,7 +22,7 @@ from torch.utils.data import DataLoader
 
 from config import PRISMConfig
 from prism  import PRISM
-from data.omniobject3d import OmniObject3DDataset
+from data.omniobject3d import OmniObject3DDataset, enumerate_object_pairs
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s",
                     datefmt="%H:%M:%S")
@@ -61,6 +62,8 @@ def validate(model, loader, device):
             batch["depth"].to(device),
             batch["normal"].to(device),
             gt_mask=batch["mask"].to(device),
+            input_c2ws=batch["input_c2ws"].to(device),
+            input_Ks=batch["input_Ks"].to(device),
         )
         total += losses["total"].item()
         n += 1
@@ -68,31 +71,70 @@ def validate(model, loader, device):
     return total / max(n, 1)
 
 
-def train(cfg: PRISMConfig, resume_path: str | None = None):
+def train(
+    cfg: PRISMConfig,
+    resume_path: str | None = None,
+    restrict_object_ids: list[str] | None = None,
+    overfit: bool = False,
+):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info("Device: %s", device)
     if device.type == "cuda":
         torch.cuda.init()
 
+    run_epochs = cfg.n_epochs
+    if overfit:
+        run_epochs = max(cfg.n_epochs, cfg.overfit_min_epochs)
+        if run_epochs > cfg.n_epochs:
+            log.info("--overfit: raising n_epochs from %d to %d", cfg.n_epochs, run_epochs)
+
     model = PRISM(cfg).to(device)
 
     enc_params   = list(model.encoder.parameters())
     other_params = [p for p in model.parameters() if not any(p is e for e in enc_params)]
+    lr_enc = cfg.lr if overfit else cfg.lr_encoder
+    wd = cfg.overfit_weight_decay if overfit else cfg.weight_decay
     opt = torch.optim.AdamW([
-        {"params": enc_params,   "lr": cfg.lr_encoder, "initial_lr": cfg.lr_encoder},
-        {"params": other_params, "lr": cfg.lr,         "initial_lr": cfg.lr},
-    ], weight_decay=cfg.weight_decay)
+        {"params": enc_params,   "lr": lr_enc, "initial_lr": lr_enc},
+        {"params": other_params, "lr": cfg.lr, "initial_lr": cfg.lr},
+    ], weight_decay=wd)
     scaler = GradScaler("cuda", enabled=(device.type == "cuda"))
 
-    train_ds = OmniObject3DDataset(cfg.data_root, split="train", image_size=cfg.image_size, n_input_views=cfg.n_input_views)
-    val_ds   = OmniObject3DDataset(cfg.data_root, split="val",   image_size=cfg.image_size, n_input_views=cfg.n_input_views)
-    train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True,
+    train_virtual = cfg.overfit_samples_per_epoch if overfit else None
+    if overfit:
+        log.info(
+            "--overfit: %d random multi-view samples per epoch (warmup_steps=%d, weight_decay=%s, encoder_lr=%.1e)",
+            cfg.overfit_samples_per_epoch,
+            cfg.overfit_warmup_steps,
+            wd,
+            lr_enc,
+        )
+    train_ds = OmniObject3DDataset(
+        cfg.data_root, split="train", image_size=cfg.image_size, n_input_views=cfg.n_input_views,
+        restrict_object_ids=restrict_object_ids,
+        virtual_epoch_len=train_virtual,
+    )
+    val_ds = OmniObject3DDataset(
+        cfg.data_root, split="val", image_size=cfg.image_size, n_input_views=cfg.n_input_views,
+        restrict_object_ids=restrict_object_ids,
+    )
+    bs_train = min(cfg.batch_size, max(1, len(train_ds)))
+    bs_val = min(cfg.batch_size, max(1, len(val_ds)))
+    if bs_train < cfg.batch_size or bs_val < cfg.batch_size:
+        log.info("Batch size clamped to train=%d val=%d (dataset smaller than cfg.batch_size=%d)",
+                 bs_train, bs_val, cfg.batch_size)
+    train_loader = DataLoader(train_ds, batch_size=bs_train, shuffle=True,
                               num_workers=cfg.num_workers, pin_memory=True, drop_last=True,
                               persistent_workers=cfg.num_workers > 0)
-    val_loader   = DataLoader(val_ds,   batch_size=cfg.batch_size, shuffle=False,
+    val_loader   = DataLoader(val_ds,   batch_size=bs_val, shuffle=False,
                               num_workers=cfg.num_workers, pin_memory=True,
                               persistent_workers=cfg.num_workers > 0)
-    log.info("Data: %d train / %d val objects", len(train_ds), len(val_ds))
+    log.info(
+        "Data: train len=%d (%d objects) / val len=%d",
+        len(train_ds),
+        len(train_ds.objects),
+        len(val_ds),
+    )
 
     start_epoch, step, best_val = 0, 0, float("inf")
     ckpt_path = Path(cfg.checkpoint)
@@ -105,8 +147,8 @@ def train(cfg: PRISMConfig, resume_path: str | None = None):
             ckpt_path.unlink()
             log.info("Fresh run: removed stale %s", ckpt_path)
 
-    run_epochs = cfg.n_epochs
     total_steps = len(train_loader) * run_epochs
+    warmup_steps = cfg.overfit_warmup_steps if overfit else cfg.warmup_steps
     model.train()
 
     t_prev = time.perf_counter()
@@ -114,20 +156,23 @@ def train(cfg: PRISMConfig, resume_path: str | None = None):
     for epoch in range(start_epoch, end_epoch):
         for batch in train_loader:
             run_step = step - (start_epoch * len(train_loader))
-            scale = lr_scale(run_step, cfg.warmup_steps, total_steps)
+            scale = lr_scale(run_step, warmup_steps, total_steps)
             for pg in opt.param_groups:
                 pg["lr"] = pg["initial_lr"] * scale
 
-            images = batch["images"].to(device, non_blocking=True)
-            depth  = batch["depth"].to(device, non_blocking=True)
-            normal = batch["normal"].to(device, non_blocking=True)
-            mask   = batch["mask"].to(device, non_blocking=True)
-            c2w    = batch["c2w"].to(device, non_blocking=True)
-            K      = batch["K"].to(device, non_blocking=True)
+            images      = batch["images"].to(device, non_blocking=True)
+            depth       = batch["depth"].to(device, non_blocking=True)
+            normal      = batch["normal"].to(device, non_blocking=True)
+            mask        = batch["mask"].to(device, non_blocking=True)
+            c2w         = batch["c2w"].to(device, non_blocking=True)
+            K           = batch["K"].to(device, non_blocking=True)
+            input_c2ws  = batch["input_c2ws"].to(device, non_blocking=True)
+            input_Ks    = batch["input_Ks"].to(device, non_blocking=True)
 
             opt.zero_grad(set_to_none=True)
             with autocast("cuda", enabled=(device.type == "cuda")):
-                losses = model(images, c2w, K, depth, normal, gt_mask=mask)
+                losses = model(images, c2w, K, depth, normal, gt_mask=mask,
+                               input_c2ws=input_c2ws, input_Ks=input_Ks)
 
             loss = losses["total"]
             if not torch.isfinite(loss).all():
@@ -151,7 +196,12 @@ def train(cfg: PRISMConfig, resume_path: str | None = None):
             with torch.no_grad():
                 if not torch.isfinite(model.log_beta):
                     model.log_beta.zero_()
-                model.log_beta.clamp_(-10.0, 6.0)
+                # Anneal the beta upper bound: start soft (large beta), sharpen over training.
+                t_frac    = min(step / max(total_steps, 1), 1.0)
+                beta_max  = cfg.beta_anneal_start * (1.0 - t_frac) + cfg.beta_anneal_end * t_frac
+                log_lo    = math.log(cfg.beta_min)
+                log_hi    = math.log(max(beta_max, cfg.beta_min))
+                model.log_beta.clamp_(log_lo, log_hi)
 
             if step % cfg.log_every == 0:
                 t_now = time.perf_counter()
@@ -162,13 +212,14 @@ def train(cfg: PRISMConfig, resume_path: str | None = None):
                 log.info(
                     "[%d/%d] step=%d  total=%.4f  render=%.4f  depth=%.4f  "
                     "normal=%.4f  eik=%.4f  sdf0=%.4f  sdf_sign=%.4f  bg_sdf=%.4f  "
-                    "sil_bce=%.4f  sil_dice=%.4f  lface=%.4f  close=%.4f  β=%.3f  lr=%.1e  %s",
+                    "bg_alpha=%.4f  sil_bce=%.4f  sil_dice=%.4f  lface=%.4f  close=%.4f  β=%.3f  lr=%.1e  %s",
                     epoch, end_epoch, step,
                     losses["total"].item(), losses["render"].item(),
                     losses["depth"].item(), losses["normal"].item(),
                     losses["eikonal"].item(),
                     losses["sdf_surface"].item(), losses["sdf_sign"].item(),
                     losses["bg_sdf"].item(),
+                    losses["bg_alpha"].item(),
                     losses["sil_bce"].item(),
                     losses["sil_dice"].item(),
                     losses["light_facing"].item(),
@@ -207,6 +258,18 @@ if __name__ == "__main__":
         help="Continue training: optional checkpoint path; default is cfg.checkpoint. "
         "Omit entirely for a fresh run (deletes existing checkpoint file first).",
     )
+    parser.add_argument(
+        "--overfit",
+        action="store_true",
+        help="Memorize one object: restrict data + many random view batches per epoch + overfit-friendly LR/WD.",
+    )
+    parser.add_argument(
+        "--overfit_object",
+        type=str,
+        default=None,
+        metavar="ID",
+        help="With --overfit, which object_id (default: first from enumerate_object_pairs).",
+    )
     args = parser.parse_args()
 
     cfg = PRISMConfig()
@@ -222,4 +285,23 @@ if __name__ == "__main__":
     else:
         resume_path = args.resume
 
-    train(cfg, resume_path=resume_path)
+    restrict: list[str] | None = None
+    if args.overfit:
+        pairs = enumerate_object_pairs(cfg.data_root)
+        if not pairs:
+            raise RuntimeError(f"--overfit: no objects under data_root={cfg.data_root!r}")
+        if args.overfit_object is not None:
+            oid = args.overfit_object
+            if not any(o[1] == oid for o in pairs):
+                raise RuntimeError(
+                    f"--overfit_object {oid!r} not found under {cfg.data_root!r} "
+                    f"(have {len(pairs)} ids, e.g. {pairs[0][1]!r})"
+                )
+            cat0 = next(c for c, o in pairs if o == oid)
+            oid0 = oid
+        else:
+            cat0, oid0 = pairs[0]
+        restrict = [oid0]
+        log.info("--overfit: memorizing %s (category %s)", oid0, cat0)
+
+    train(cfg, resume_path=resume_path, restrict_object_ids=restrict, overfit=args.overfit)

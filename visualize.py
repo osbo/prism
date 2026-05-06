@@ -12,6 +12,7 @@ VS Code / Cursor:
   • Pass ``--no-export-mesh`` to skip mesh export.
 
 python visualize.py [--n_objects N] [--checkpoint model.pt] [--out_dir eval_results/visuals]
+python visualize.py --overfit   # same single object as train.py --overfit (first on disk by default)
 python visualize.py --mesh-format obj
 python visualize.py --no-export-mesh
 """
@@ -30,7 +31,7 @@ import trimesh
 from config import PRISMConfig
 from prism import PRISM
 from prism.mesh_extract import extract_sdf_mesh
-from data.omniobject3d import OmniObject3DDataset
+from data.omniobject3d import OmniObject3DDataset, enumerate_object_pairs
 
 log = logging.getLogger("visualize")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
@@ -41,19 +42,17 @@ def to_uint8(t: torch.Tensor) -> np.ndarray:
     return (t.clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
 
 
-def color_to_uint8(color: torch.Tensor, opacity: torch.Tensor, alpha_thresh: float = 0.2) -> np.ndarray:
-    """Predicted RGB as uint8; pixels with opacity ≤ thresh are black (same FG rule as depth)."""
+def color_to_uint8(color: torch.Tensor, fg_mask: np.ndarray) -> np.ndarray:
+    """Predicted RGB as uint8; background (non-hit rays) is black."""
     c = color.clamp(0, 1).cpu().numpy()
-    fg = (opacity.cpu().float().numpy() > alpha_thresh)[..., None]
-    c = np.where(fg, c, 0.0)
+    c = np.where(fg_mask[..., None], c, 0.0)
     return (c * 255).astype(np.uint8)
 
 
-def depth_to_rgb(depth: torch.Tensor, opacity: torch.Tensor, alpha_thresh: float = 0.2) -> np.ndarray:
-    """Visualize depth only on confident (non-background) pixels."""
+def depth_to_rgb(depth: torch.Tensor, fg_mask: np.ndarray) -> np.ndarray:
+    """Visualize depth only on hit rays."""
     d = depth.cpu().float()
-    a = opacity.cpu().float()
-    fg = a > alpha_thresh
+    fg = torch.from_numpy(fg_mask).to(device=d.device)
     if fg.any():
         lo, hi = d[fg].min(), d[fg].max()
     else:
@@ -65,10 +64,10 @@ def depth_to_rgb(depth: torch.Tensor, opacity: torch.Tensor, alpha_thresh: float
     return np.stack([arr, arr, arr], axis=-1)
 
 
-def normal_to_rgb(normal: torch.Tensor, opacity: torch.Tensor, alpha_thresh: float = 0.2) -> np.ndarray:
-    """Map normals to RGB and hide low-opacity background."""
+def normal_to_rgb(normal: torch.Tensor, fg_mask: np.ndarray) -> np.ndarray:
+    """Map normals to RGB and hide background."""
     n = (normal * 0.5 + 0.5).clamp(0, 1)
-    fg = (opacity.cpu().float() > alpha_thresh)
+    fg = torch.from_numpy(fg_mask).to(device=n.device)
     n = n.cpu()
     n[~fg] = 0.0
     return to_uint8(n)
@@ -150,7 +149,7 @@ def visualize(
     export_mesh: bool = False,
     mesh_dir: Path | None = None,
     mesh_format: str = "obj",
-    alpha_thresh: float = 0.2,
+    restrict_object_ids: list[str] | None = None,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -159,7 +158,10 @@ def visualize(
     model.load_state_dict(ckpt["model"], strict=False)
     model.eval()
 
-    test_ds = OmniObject3DDataset(cfg.data_root, split="test", image_size=cfg.image_size, n_input_views=cfg.n_input_views)
+    test_ds = OmniObject3DDataset(
+        cfg.data_root, split="test", image_size=cfg.image_size, n_input_views=cfg.n_input_views,
+        restrict_object_ids=restrict_object_ids,
+    )
     loader  = DataLoader(test_ds, batch_size=1, shuffle=False, num_workers=0)
     log.info("Rendering %d test objects → %s", len(test_ds), out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -184,7 +186,8 @@ def visualize(
                 ext = "obj"
             mesh_path = mdir / f"{obj_id}.{ext}"
             with torch.no_grad():
-                z_latent = model.encoder(images)[0]
+                z_latent, _ = model.encoder(images)
+                z_latent    = z_latent[0]
             mc = extract_sdf_mesh(
                 model,
                 z_latent,
@@ -214,12 +217,12 @@ def visualize(
             view_c2w = input_c2ws[:, vi]   # (1, 4, 4)
             view_K   = input_Ks[:, vi]     # (1, 3, 3)
             with torch.no_grad():
-                r = model.render_image(images, view_c2w, view_K)
+                r = model.render_image(images, input_c2ws, input_Ks, view_c2w, view_K)
 
-            pred_rgb  = color_to_uint8(r["color"], r["opacity"], alpha_thresh=alpha_thresh)
+            pred_mask = r["hit"].cpu().numpy().astype(bool)
+            pred_rgb  = color_to_uint8(r["color"], pred_mask)
             pred_op   = opacity_to_rgb(r["opacity"])
-            pred_d    = depth_to_rgb(r["depth"], r["opacity"], alpha_thresh=alpha_thresh)
-            pred_mask = r["opacity"].cpu().numpy() > alpha_thresh
+            pred_d    = depth_to_rgb(r["depth"], pred_mask)
             diff      = mask_diff_rgb(gt_mask, pred_mask)
 
             tag = f"v{vi}"
@@ -262,10 +265,16 @@ if __name__ == "__main__":
         help="File format for exported mesh (both work with common VS Code 3D extensions).",
     )
     parser.add_argument(
-        "--alpha_thresh",
-        type=float,
-        default=0.2,
-        help="Opacity threshold used for foreground/background separation in visualizations.",
+        "--overfit",
+        action="store_true",
+        help="Render only one object (default id matches train.py --overfit without --overfit_object).",
+    )
+    parser.add_argument(
+        "--overfit_object",
+        type=str,
+        default=None,
+        metavar="ID",
+        help="With --overfit, which object_id to render (default: first on disk).",
     )
     args = parser.parse_args()
 
@@ -275,6 +284,25 @@ if __name__ == "__main__":
             setattr(cfg, k, getattr(args, k))
 
     mesh_dir_arg = Path(args.mesh_dir) if args.mesh_dir else None
+    restrict: list[str] | None = None
+    if args.overfit:
+        pairs = enumerate_object_pairs(cfg.data_root)
+        if not pairs:
+            raise RuntimeError(f"--overfit: no objects under data_root={cfg.data_root!r}")
+        if args.overfit_object is not None:
+            oid = args.overfit_object
+            if not any(o[1] == oid for o in pairs):
+                raise RuntimeError(
+                    f"--overfit_object {oid!r} not found under {cfg.data_root!r} "
+                    f"(have {len(pairs)} ids, e.g. {pairs[0][1]!r})"
+                )
+            cat0 = next(c for c, o in pairs if o == oid)
+            oid0 = oid
+        else:
+            cat0, oid0 = pairs[0]
+        restrict = [oid0]
+        log.info("--overfit: visualizing %s (category %s)", oid0, cat0)
+
     visualize(
         cfg,
         n_objects=args.n_objects,
@@ -282,5 +310,5 @@ if __name__ == "__main__":
         export_mesh=args.export_mesh,
         mesh_dir=mesh_dir_arg,
         mesh_format=args.mesh_format,
-        alpha_thresh=args.alpha_thresh,
+        restrict_object_ids=restrict,
     )

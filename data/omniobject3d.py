@@ -24,7 +24,7 @@ The dataset returns one (object, view) per sample; a random view is chosen in __
 import json
 import random
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -192,6 +192,60 @@ def _scale_K(K: np.ndarray, orig_wh: Tuple[int, int], new_wh: Tuple[int, int]) -
     return Ks.astype(np.float32)
 
 
+def enumerate_object_pairs(
+    data_root: str | Path,
+    categories: Optional[List[str]] = None,
+) -> List[Tuple[str, str]]:
+    """
+    All ``(category, object_id)`` pairs on disk in the same stable order as
+    ``OmniObject3DDataset`` uses before train/val/test splitting.
+    """
+    data_root = Path(data_root)
+    pre_root = data_root / "blender_renders_24_views"
+    ext_root = data_root / "blender_renders"
+    if pre_root.is_dir():
+        objects: List[Tuple[str, str]] = []
+        for cat_dir in sorted(pre_root.iterdir()):
+            if not cat_dir.is_dir():
+                continue
+            if categories and cat_dir.name not in categories:
+                continue
+            for obj_dir in sorted(cat_dir.iterdir()):
+                if not obj_dir.is_dir():
+                    continue
+                if _rgb_path(obj_dir, 0).exists():
+                    objects.append((cat_dir.name, obj_dir.name))
+        return objects
+    if ext_root.is_dir():
+        objects = []
+        for oid_dir in sorted(ext_root.iterdir()):
+            if not oid_dir.is_dir():
+                continue
+            obj_id = oid_dir.name
+            cat = _infer_category(obj_id)
+            if categories and cat not in categories:
+                continue
+            render_dir = oid_dir / "render"
+            tpath = render_dir / "transforms.json"
+            if not tpath.exists():
+                continue
+            with open(tpath) as f:
+                meta_json = json.load(f)
+            frames: List = meta_json.get("frames") or []
+            if not frames:
+                continue
+            fp0 = frames[0]["file_path"]
+            rgb0 = render_dir / "images" / f"{fp0}.png"
+            if not rgb0.exists():
+                continue
+            objects.append((cat, obj_id))
+        return objects
+    raise FileNotFoundError(
+        f"OmniObject3D data not found under {data_root}: "
+        f"expected {pre_root} or {ext_root}."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Dataset
 # ---------------------------------------------------------------------------
@@ -205,6 +259,10 @@ class OmniObject3DDataset(Dataset):
         image_size:   Square resize; default 800 (no resize when native size is 800).
         split_file:   Optional JSON {split: [object_ids]}.
         categories:   Optional list of category names (preprocessed: folder name; extracted: prefix before '_').
+        restrict_object_ids: If set, only these ``object_id`` strings (e.g. ``clock_029``) are kept,
+            in the given order; train/val/test splits and ``split_file`` are ignored for membership.
+        virtual_epoch_len: If set, ``__len__`` returns this value and indices wrap so each index
+            draws a **new** random multi-view sample for the same object list (for single-object overfit).
     """
 
     N_VIEWS = 24
@@ -218,6 +276,8 @@ class OmniObject3DDataset(Dataset):
         split_file: Optional[str] = None,
         categories: Optional[List[str]] = None,
         n_input_views: int = 1,
+        restrict_object_ids: Optional[Sequence[str]] = None,
+        virtual_epoch_len: Optional[int] = None,
     ):
         super().__init__()
         self.data_root = Path(data_root)
@@ -255,7 +315,21 @@ class OmniObject3DDataset(Dataset):
         else:
             all_objects = self._enumerate_extracted(categories)
 
-        if split_file is not None:
+        if restrict_object_ids is not None:
+            wanted = list(dict.fromkeys(restrict_object_ids))
+            wanted_set = set(wanted)
+            self.objects = [o for o in all_objects if o[1] in wanted_set]
+            if len(self.objects) == 0:
+                raise RuntimeError(
+                    f"No objects match restrict_object_ids={list(wanted)!r} under {self.render_root} "
+                    f"(layout={self._layout})."
+                )
+            rank = {pid: i for i, pid in enumerate(wanted)}
+            self.objects.sort(key=lambda o: (rank[o[1]], o[0], o[1]))
+            if self._layout == "extracted":
+                keep = set(self.objects)
+                self._extracted_meta = {k: v for k, v in self._extracted_meta.items() if k in keep}
+        elif split_file is not None:
             with open(split_file) as f:
                 split_map = json.load(f)
             ids_in_split = set(split_map[split])
@@ -268,6 +342,10 @@ class OmniObject3DDataset(Dataset):
                 f"No objects found for split='{split}' under {self.render_root} "
                 f"(layout={self._layout})."
             )
+
+        self._virtual_epoch_len = virtual_epoch_len
+        if virtual_epoch_len is not None and virtual_epoch_len < 1:
+            raise ValueError("virtual_epoch_len must be >= 1 when set")
 
     def _enumerate_preprocessed(self, categories: Optional[List[str]]) -> List[Tuple[str, str]]:
         objects: List[Tuple[str, str]] = []
@@ -333,10 +411,12 @@ class OmniObject3DDataset(Dataset):
         return shuffled[n_train + n_val :]
 
     def __len__(self) -> int:
+        if self._virtual_epoch_len is not None:
+            return self._virtual_epoch_len
         return len(self.objects)
 
     def __getitem__(self, idx: int) -> dict:
-        cat, obj_id = self.objects[idx]
+        cat, obj_id = self.objects[idx % len(self.objects)]
 
         if self._layout == "preprocessed":
             return self._getitem_preprocessed(cat, obj_id)

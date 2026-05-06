@@ -88,7 +88,7 @@ def evaluate(cfg: PRISMConfig, n_objects=None):
         mesh_path = batch["mesh_path"][0]
 
         with torch.no_grad():
-            z = model.encoder(images)
+            z, _ = model.encoder(images)
 
         mc = extract_sdf_mesh(
             model,
