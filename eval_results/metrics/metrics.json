@@ -1,0 +1,30 @@
+{
+  "aggregate": {
+    "n_objects": 1,
+    "fscore_tau": 0.01,
+    "n_eval_pts": 100000,
+    "chamfer_mean": 0.19734498146410848,
+    "chamfer_std": 0.0,
+    "fscore_mean": 0.0,
+    "fscore_std": 0.0,
+    "psnr_mean_db": 12.322971338305365,
+    "psnr_std_db": 0.0
+  },
+  "per_object": [
+    {
+      "object_id": "bottle_001",
+      "mesh_path": "/home/osbo/orcd/pool/omniobject3d/extracted/raw_scans/bottle_001/Scan/Scan.obj",
+      "chamfer": 0.19734498146410848,
+      "fscore": 0.0,
+      "psnr_db": 12.322971338305365,
+      "psnr_per_view": [
+        11.139527772126662,
+        12.37835455845773,
+        11.275316783029815,
+        13.470086712974286,
+        13.35157086493833
+      ],
+      "elapsed_s": 89.78
+    }
+  ]
+}

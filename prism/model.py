@@ -22,6 +22,7 @@ from .encoder  import ImageEncoder
 from .sdf_mlp  import SDFMLP
 from .brdf     import BRDFHead, LightHead, cook_torrance_ggx
 from .renderer import sample_rays, neus_weights, sample_pdf
+from .losses   import VGGPerceptualLoss
 
 
 class PRISM(nn.Module):
@@ -39,6 +40,9 @@ class PRISM(nn.Module):
         # NeuS β: controls surface sharpness.  Learned; started soft, sharpens during training.
         self.log_beta   = nn.Parameter(torch.tensor(0.0))   # β = exp(log_β), init = 1.0
         self.cfg        = cfg
+        # Perceptual loss (VGG frozen weights — not part of model checkpoint).
+        if float(getattr(cfg, "lambda_perceptual", 0.0)) > 0:
+            self.perceptual_loss = VGGPerceptualLoss()
 
     @property
     def beta(self):
@@ -145,6 +149,104 @@ class PRISM(nn.Module):
             min_val[mb] = sampled.min(dim=0).values
 
         return min_val   # (N_pts,)
+
+    # ------------------------------------------------------------------
+    # Training forward
+    # ------------------------------------------------------------------
+    # Patch rendering for perceptual loss (training only)
+    # ------------------------------------------------------------------
+    def _render_patch(
+        self,
+        z_b0: torch.Tensor,           # (latent_dim,) — single-element batch latent
+        feat_maps,                     # (1, Nv, C, Hf, Wf) or None
+        input_c2ws,                    # (1, Nv, 4, 4) or None
+        input_Ks,                      # (1, Nv, 3, 3) or None
+        c2w_b0: torch.Tensor,          # (4, 4)
+        K_b0: torch.Tensor,            # (3, 3)
+        rows: torch.Tensor,            # (Np,) pixel row indices
+        cols: torch.Tensor,            # (Np,) pixel col indices
+        img_hw: tuple,
+    ) -> torch.Tensor:
+        """
+        Render a specified set of pixels with gradients (for perceptual loss).
+        Returns predicted RGB (Np, 3).
+        """
+        cfg    = self.cfg
+        device = z_b0.device
+        H, W   = img_hw
+        Np     = rows.shape[0]
+
+        fx, fy = K_b0[0, 0], K_b0[1, 1]
+        cx, cy = K_b0[0, 2], K_b0[1, 2]
+        dirs_cam = torch.stack([
+            (cols.float() - cx) / fx,
+            -(rows.float() - cy) / fy,
+            -torch.ones(Np, device=device, dtype=torch.float32),
+        ], dim=-1)                                               # (Np, 3)
+        rd = F.normalize(dirs_cam @ c2w_b0[:3, :3].T, dim=-1)  # (Np, 3)
+        ro = c2w_b0[:3, 3].unsqueeze(0).expand(Np, 3)
+
+        near, far = cfg.near, cfg.far
+        z_exp = z_b0.unsqueeze(0).expand(Np, -1)               # (Np, latent_dim)
+        beta_v = self.beta.float().clamp(min=float(cfg.beta_min))
+
+        # Coarse samples + optional hierarchical fine resampling.
+        t = torch.linspace(near, far, cfg.n_samples, device=device).unsqueeze(0).expand(Np, -1)
+        if getattr(cfg, "n_importance", 0) > 0:
+            with torch.no_grad():
+                pts_c  = ro[:, None] + t[:, :, None] * rd[:, None]
+                zc     = z_exp[:, None].expand(-1, cfg.n_samples, -1).reshape(-1, z_b0.shape[-1])
+                bidx_c = torch.zeros(Np * cfg.n_samples, dtype=torch.long, device=device)
+                lf_c   = (self._project_features(pts_c.reshape(-1, 3), bidx_c,
+                           input_c2ws.float(), input_Ks.float(), feat_maps.float(), (H, W))
+                          if feat_maps is not None else None)
+                sf_c   = self.sdf_mlp(pts_c.reshape(-1, 3), zc, lf_c).squeeze(-1).reshape(Np, cfg.n_samples)
+                w_c    = neus_weights(sf_c, beta_v, t).detach()
+                t_mid  = 0.5 * (t[:, :-1] + t[:, 1:])
+                t_fine = sample_pdf(t_mid, w_c[:, 1:-1].clamp_min(1e-6), int(cfg.n_importance), det=False)
+                t      = torch.sort(torch.cat([t, t_fine], dim=-1), dim=-1).values
+
+        n_tot  = t.shape[1]
+        pts    = ro[:, None] + t[:, :, None] * rd[:, None]
+        z_pts  = z_exp[:, None].expand(-1, n_tot, -1).reshape(-1, z_b0.shape[-1])
+        bidx   = torch.zeros(Np * n_tot, dtype=torch.long, device=device)
+
+        with autocast("cuda", enabled=False):
+            lf = (self._project_features(pts.reshape(-1, 3), bidx,
+                   input_c2ws.float(), input_Ks.float(), feat_maps.float(), (H, W))
+                  if feat_maps is not None else None)
+            sf = self.sdf_mlp(pts.reshape(-1, 3), z_pts, lf).squeeze(-1).reshape(Np, n_tot)
+            # Analytic normals via autograd (no create_graph needed — not part of main loss graph).
+            with torch.enable_grad():
+                pts_g = pts.reshape(-1, 3).detach().requires_grad_(True)
+                sf_g  = self.sdf_mlp(pts_g, z_pts, lf).squeeze(-1)
+                gn    = torch.autograd.grad(sf_g, pts_g, torch.ones_like(sf_g))[0]
+            gn = gn.reshape(Np, n_tot, 3)
+
+        w     = neus_weights(sf.detach(), beta_v, t)
+        w_sum = w.sum(-1)
+        hit   = w_sum > cfg.depth_hit_w_sum_thresh
+        d     = (w * t).sum(-1) / w_sum.clamp_min(1e-8)
+        nm    = (w[:, :, None] * gn).sum(1)
+        nm    = torch.where(hit[:, None], F.normalize(nm, dim=-1, eps=1e-6),
+                            F.normalize(-rd, dim=-1, eps=1e-6))
+        vd    = (nm * (-rd)).sum(-1, keepdim=True)
+        nm    = torch.where(vd < 0, -nm, nm)
+        xs    = ro + d[:, None] * rd
+
+        if device.type == "cuda":
+            with autocast("cuda", enabled=True):
+                ab, ro_, me = self.brdf_head(z_exp)
+                lp, li, am  = self.light_head(z_exp)
+        else:
+            ab, ro_, me = self.brdf_head(z_exp)
+            lp, li, am  = self.light_head(z_exp)
+
+        col = cook_torrance_ggx(
+            nm, F.normalize(-rd, dim=-1), F.normalize(lp - xs, dim=-1),
+            ab, ro_, me, li, am,
+        )
+        return col   # (Np, 3)
 
     # ------------------------------------------------------------------
     # Training forward
@@ -450,25 +552,31 @@ class PRISM(nn.Module):
         gnrm = sdf_grad.norm(dim=-1)
         l_eikonal = ((gnrm.clamp(max=100.0) - 1.0) ** 2).mean()
 
-        # Curvature regularization — Hutchinson trace estimator of the SDF Hessian.
-        # Penalizes large Laplacians, which drives the banding / high-freq oscillation artifacts.
-        # Requires create_graph=True (already set above when self.training).
-        lam_curv = float(getattr(cfg, "lambda_curvature", 0.0))
-        if self.training and lam_curv > 0.0:
-            n_curv = min(int(getattr(cfg, "curvature_n_pts", 512)), pts_flat.shape[0])
-            idx_c  = torch.randperm(pts_flat.shape[0], device=device)[:n_curv]
-            v_c    = torch.randn(n_curv, 3, device=device, dtype=pts_flat.dtype)
-            # Second derivative: H[idx_c] @ v_c via one extra backward through sdf_grad.
-            Hv = torch.autograd.grad(
-                (sdf_grad[idx_c] * v_c).sum(),
-                pts_flat,
-                retain_graph=True,
-                create_graph=False,
-            )[0][idx_c]   # (n_curv, 3)
-            # v^T H v is an unbiased estimator of trace(H) = Laplacian(SDF).
-            l_curvature = (Hv * v_c).sum(-1).pow(2).mean()
+        # Perceptual patch loss — render a random patch and compare in VGG feature space.
+        lam_perc = float(getattr(cfg, "lambda_perceptual", 0.0))
+        do_perc  = self.training and lam_perc > 0.0 and hasattr(self, "perceptual_loss")
+        if do_perc:
+            psz  = int(getattr(cfg, "perceptual_patch_size", 32))
+            pr0  = torch.randint(0, max(1, H - psz + 1), (1,)).item()
+            pc0  = torch.randint(0, max(1, W - psz + 1), (1,)).item()
+            pr   = torch.arange(pr0, pr0 + psz, device=device)
+            pc_  = torch.arange(pc0, pc0 + psz, device=device)
+            pgrid_r, pgrid_c = torch.meshgrid(pr, pc_, indexing="ij")   # (psz, psz)
+
+            patch_col = self._render_patch(
+                z_fp32[0],
+                feat_maps[:1] if feat_maps is not None else None,
+                input_c2ws[:1].float() if input_c2ws is not None else None,
+                input_Ks[:1].float()   if input_Ks   is not None else None,
+                c2w[0].float(), K[0].float(),
+                pgrid_r.reshape(-1), pgrid_c.reshape(-1),
+                (H, W),
+            )
+            pred_patch = patch_col.reshape(1, psz, psz, 3).permute(0, 3, 1, 2)  # (1,3,psz,psz)
+            gt_patch   = images[0:1, 0, :, pr0:pr0 + psz, pc0:pc0 + psz].float()
+            l_perceptual = self.perceptual_loss(pred_patch, gt_patch)
         else:
-            l_curvature = sdf_flat.sum() * 0.0
+            l_perceptual = pred_color.sum() * 0.0
 
         # Closure prior (lightweight): keep center inside and far boundary outside.
         with autocast("cuda", enabled=False):
@@ -487,13 +595,13 @@ class PRISM(nn.Module):
 
         total = (
             cfg.lambda_render        * l_render
+            + lam_perc               * l_perceptual
             + cfg.lambda_bg_render   * l_render_bg
             + cfg.lambda_bg_sdf      * l_bg_sdf
             + cfg.lambda_bg_alpha    * l_bg_alpha
             + cfg.lambda_depth       * l_depth
             + cfg.lambda_normal      * l_normal
             + cfg.lambda_eik         * l_eikonal
-            + lam_curv               * l_curvature
             + cfg.lambda_sdf_surface * l_sdf_surface
             + cfg.lambda_sdf_sign    * l_sdf_sign
             + cfg.lambda_sdf_band    * l_sdf_band
@@ -506,12 +614,12 @@ class PRISM(nn.Module):
         return {
             "total":        total,
             "render":       l_render.detach(),
+            "perceptual":   l_perceptual.detach(),
             "bg_sdf":       l_bg_sdf.detach(),
             "bg_alpha":     l_bg_alpha.detach(),
             "depth":        l_depth.detach(),
             "normal":       l_normal.detach(),
             "eikonal":      l_eikonal.detach(),
-            "curvature":    l_curvature.detach(),
             "sdf_surface":  l_sdf_surface.detach(),
             "sdf_sign":     l_sdf_sign.detach(),
             "sdf_band":     l_sdf_band.detach(),

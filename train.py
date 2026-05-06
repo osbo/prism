@@ -149,6 +149,8 @@ def train(
             log.info("Fresh run: removed stale %s", ckpt_path)
 
     total_steps = len(train_loader) * run_epochs
+    spl = len(train_loader)
+    beta_anneal_steps = max(int(getattr(cfg, "beta_anneal_epochs", 30)) * spl, 1)
     warmup_steps = cfg.overfit_warmup_steps if overfit else cfg.warmup_steps
     model.train()
 
@@ -198,8 +200,8 @@ def train(
             with torch.no_grad():
                 if not torch.isfinite(model.log_beta):
                     model.log_beta.zero_()
-                # Anneal the beta upper bound: start soft (large beta), sharpen over training.
-                t_frac    = min(step / max(total_steps, 1), 1.0)
+                # Linear β upper bound over first beta_anneal_epochs (fixed step count, not run_epochs).
+                t_frac    = min(float(step) / float(beta_anneal_steps), 1.0)
                 beta_max  = cfg.beta_anneal_start * (1.0 - t_frac) + cfg.beta_anneal_end * t_frac
                 log_lo    = math.log(cfg.beta_min)
                 log_hi    = math.log(max(beta_max, cfg.beta_min))
@@ -212,14 +214,14 @@ def train(
                 )
                 t_prev = t_now
                 log.info(
-                    "[%d/%d] step=%d  total=%.4f  render=%.4f  depth=%.4f  "
-                    "normal=%.4f  eik=%.4f  curv=%.4f  sdf0=%.4f  sdf_sign=%.4f  sdf_band=%.4f  bg_sdf=%.4f  "
+                    "[%d/%d] step=%d  total=%.4f  render=%.4f  perc=%.4f  depth=%.4f  "
+                    "normal=%.4f  eik=%.4f  sdf0=%.4f  sdf_sign=%.4f  sdf_band=%.4f  bg_sdf=%.4f  "
                     "bg_alpha=%.4f  sil_bce=%.4f  sil_dice=%.4f  hull=%.4f  lface=%.4f  close=%.4f  β=%.3f  lr=%.1e  %s",
                     epoch, end_epoch, step,
                     losses["total"].item(), losses["render"].item(),
+                    losses["perceptual"].item(),
                     losses["depth"].item(), losses["normal"].item(),
                     losses["eikonal"].item(),
-                    losses["curvature"].item(),
                     losses["sdf_surface"].item(), losses["sdf_sign"].item(),
                     losses["sdf_band"].item(),
                     losses["bg_sdf"].item(),

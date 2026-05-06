@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -11,7 +11,7 @@ class PRISMConfig:
 
     # Model
     latent_dim:        int   = 128
-    feat_dim:          int   = 32     # per-point local feature dim projected from input views (0 = global-only)
+    feat_dim:          int   = 16     # per-point local feature dim projected from input views (0 = global-only)
     pretrained_encoder: bool = True
     sdf_hidden:        int   = 256
     sdf_layers:        int   = 8
@@ -31,34 +31,61 @@ class PRISMConfig:
     # Hard clamp raw SDF logits before NeuS sigmoid (fp32 path; improves AMP stability).
     sdf_clamp: float = 5.0
 
-    # Loss weights
-    lambda_render: float = 1.0
-    lambda_depth:  float = 1.0
-    lambda_normal: float = 0.5
+    # Loss weights: each lambda scales its matching l_* term in prism/model.py total.
+    # Tuned for depth + normals as primary objectives; RGB (render/perc) secondary.
+    # Log column names from train.py when they differ from lambda_* names:
+    #   render depth normal eik sdf0 sdf_sign sdf_band close bg_sdf bg_alpha
+    #   sil_bce sil_dice hull perc lface
+    #
+    #  lambda_render           render       L1 shaded RGB (Cook-Torrance) vs GT on FG rays (GT mask).
+    #  lambda_depth            depth        L1 rendered depth vs GT depth where GT depth valid.
+    #  lambda_normal           normal       1 - cosine similarity vs GT normals where GT valid.
+    #  lambda_eik              eik          Mean squared (||grad SDF|| - 1) with capped grad norm.
+    #  lambda_sdf_surface      sdf0         |SDF| at ray sample closest to GT depth (surface hits data).
+    #  lambda_sdf_sign         sdf_sign     In front of GT depth SDF should be +; behind should be -.
+    #  lambda_sdf_band         sdf_band     Extra samples offset along ray: outside + / inside - bands.
+    #  lambda_closure          close        Weak prior: origin inside object; random dirs at mc_bound outside.
+    #  lambda_bg_render        (unused)     Kept at 0: no RGB loss on background pixels.
+    #  lambda_bg_sdf           bg_sdf       BG rays: softplus keeps SDF samples >= margin (empty space).
+    #  lambda_bg_alpha         bg_alpha     BG rays: NeuS weight sum -> 0 (no density in background).
+    #  lambda_sil_bce          sil_bce      BCE on soft-min SDF silhouette vs FG/BKG from mask.
+    #  lambda_sil_dice         sil_dice     1 - Dice between predicted silhouette and GT mask.
+    #  lambda_visual_hull      hull         Points outside any input-view mask -> positive SDF (carving).
+    #  lambda_perceptual       perc         VGG feature L1 on random rendered patch vs GT patch.
+    #  lambda_light_facing     lface        Penalize normals with n dot l <= 0 for BRDF gradient flow.
+    lambda_render: float = 0.35
+    lambda_depth:  float = 4.0
+    lambda_normal: float = 2.5
     lambda_eik:    float = 1.0
-    # Direct SDF supervision from GT depth (prevents all-negative saturation collapse)
-    lambda_sdf_surface: float = 1.0
-    lambda_sdf_sign:    float = 0.5
-    lambda_sdf_band:    float = 1.0   # local front/back sign flip around GT depth
-    sdf_band_delta:     float = 0.03  # meters along ray for front/back band probes
-    # Closure priors: keep origin inside and boundary outside.
+    lambda_sdf_surface: float = 2.0
+    lambda_sdf_sign:    float = 1.0
+    lambda_sdf_band:    float = 1.5
+    sdf_band_delta:     float = 0.03  # meters along ray for sdf_band probes
     lambda_closure:     float = 0.01
     closure_center_margin: float = 0.05
     closure_boundary_margin: float = 0.05
-    # Background constraints from mask (outside object should stay empty).
     lambda_bg_render:   float = 0.0
     lambda_bg_sdf:      float = 2.0
-    lambda_bg_alpha:    float = 2.0   # penalize non-empty NeUS mass on GT background rays
+    lambda_bg_alpha:    float = 2.0
     bg_sdf_margin:      float = 0.02
-    # Silhouette matching (sampled rays): drives object contour away from spherical blob.
     lambda_sil_bce:     float = 3.0
     lambda_sil_dice:    float = 0.5
+    lambda_visual_hull:  float = 1.5
+    visual_hull_margin:  float = 0.02  # same scale as bg_sdf_margin
+    lambda_perceptual:    float = 0.5
+    perceptual_patch_size: int = 32    # patch_size^2 extra rays per step
+    lambda_light_facing: float = 0.5
     # Temperature for SDF soft-min silhouette logits (smaller = crisper but less stable).
     sil_sdf_tau:        float = 0.02
-    # NeuS sharpness: annealed upper bound forces surface to sharpen over training.
-    beta_min:           float = 0.01
-    beta_anneal_start:  float = 0.5   # max beta at step 0 (soft surface)
-    beta_anneal_end:    float = 0.01  # max beta at end of training (sharp surface)
+    # NeuS β: learned log_β is clamped to [beta_min, beta_max]. beta_max falls linearly from
+    # beta_anneal_start (training start) to beta_anneal_end over the first ``beta_anneal_epochs``
+    # worth of optimizer steps (step / (beta_anneal_epochs * len(train_loader))), then stays at end.
+    # This horizon is independent of ``n_epochs`` so changing run length or --resume does not
+    # re-stretch the anneal by changing the denominator.
+    beta_min:            float = 1e-6
+    beta_anneal_epochs: int   = 30
+    beta_anneal_start:   float = 0.25   # max β at start of anneal (softer surface)
+    beta_anneal_end:    float = 1e-6    # max β after anneal (sharper surface)
 
     # Training
     n_epochs:       int   = 100
@@ -78,11 +105,6 @@ class PRISMConfig:
     save_every:     int   = 5       # epochs — periodic checkpoint
     eval_every:     int   = 5       # epochs — val + best-on-val (same cadence)
 
-    # Curvature regularization: Hutchinson trace estimator of the SDF Hessian.
-    # Penalizes large Laplacians which drive banding and high-frequency oscillations.
-    lambda_curvature: float = 0.01
-    curvature_n_pts:  int   = 512   # points subsampled per step for the Hessian trace
-
     # Evaluation / mesh export
     # Higher resolution reduces axis-aligned marching-cubes stairsteps on curved surfaces.
     mc_resolution: int   = 192      # was 128; ↑ for smoother meshes (slower ~ (res/128)³)
@@ -97,14 +119,6 @@ class PRISMConfig:
     # Blur GT mask before carving + soft blend (reduces harsh voxel-aligned “steps” at carve boundary).
     mc_carve_mask_blur_radius: int = 2   # 0 = hard silhouette (more stairsteps); 2 ≈ 5×5 Gaussian
 
-    # Visual hull: any sampled point outside the mask in any input view must have SDF > 0.
-    # This hard-encodes multi-view silhouette geometry so the model needn't re-discover it.
-    # Keep below lambda_sdf_sign (0.5) * ~3 so the interior sign losses can still form the
-    # negative SDF region needed for marching cubes zero crossings.
-    lambda_visual_hull:  float = 1.5
-    visual_hull_margin:  float = 0.02   # same scale as bg_sdf_margin
-
-    # Light-facing penalty: push n·l > 0 so render loss provides non-zero gradients.
-    lambda_light_facing: float = 1.0
+    # Evaluation metrics (not training losses)
     fscore_tau:    float = 0.01
     n_eval_pts:    int   = 100_000
