@@ -77,6 +77,8 @@ def sample_pdf(
         u = u.unsqueeze(0).expand(bins.shape[0], -1)
     else:
         u = torch.rand(bins.shape[0], n_samples, device=bins.device, dtype=bins.dtype)
+    cdf = cdf.contiguous()
+    u = u.contiguous()
     inds = torch.searchsorted(cdf, u, right=True)
     below = (inds - 1).clamp(min=0)
     above = inds.clamp(max=cdf.shape[-1] - 1)

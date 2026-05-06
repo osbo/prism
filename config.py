@@ -6,7 +6,7 @@ class PRISMConfig:
     # Data
     data_root:      str = "/home/osbo/orcd/pool/omniobject3d/extracted"
     image_size:     int = 256          # resize for training speed (800 for full quality)
-    num_workers:    int = 4
+    num_workers:    int = 8
     n_input_views:  int = 5            # context views fed to encoder; 1 = classic single-view
 
     # Model
@@ -20,8 +20,9 @@ class PRISMConfig:
     sdf_init_radius:   float = 0.35
 
     # Rendering
-    n_rays:    int   = 256          # rays sampled per image per training step
-    n_samples: int   = 96           # samples along each ray
+    n_rays:    int   = 128          # rays sampled per image per training step
+    n_samples: int   = 64           # samples along each ray
+    n_importance: int = 24          # hierarchical fine samples per ray (NeUS importance resampling)
     near:      float = 0.5
     far:       float = 6.0
     # Depth / inference: no surface mass along the ray → depth clamped to far
@@ -38,6 +39,8 @@ class PRISMConfig:
     # Direct SDF supervision from GT depth (prevents all-negative saturation collapse)
     lambda_sdf_surface: float = 1.0
     lambda_sdf_sign:    float = 0.5
+    lambda_sdf_band:    float = 1.0   # local front/back sign flip around GT depth
+    sdf_band_delta:     float = 0.03  # meters along ray for front/back band probes
     # Closure priors: keep origin inside and boundary outside.
     lambda_closure:     float = 0.01
     closure_center_margin: float = 0.05
@@ -53,9 +56,9 @@ class PRISMConfig:
     # Temperature for SDF soft-min silhouette logits (smaller = crisper but less stable).
     sil_sdf_tau:        float = 0.02
     # NeuS sharpness: annealed upper bound forces surface to sharpen over training.
-    beta_min:           float = 0.03
-    beta_anneal_start:  float = 0.25  # max beta at step 0 (soft surface)
-    beta_anneal_end:    float = 0.015  # max beta at end of training (sharp surface)
+    beta_min:           float = 0.01
+    beta_anneal_start:  float = 0.0  # max beta at step 0 (soft surface)
+    beta_anneal_end:    float = 0.00  # max beta at end of training (sharp surface)
 
     # Training
     n_epochs:       int   = 100

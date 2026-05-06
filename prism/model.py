@@ -178,6 +178,7 @@ class PRISM(nn.Module):
         bidx_pts = bidx[:, None].expand(-1, n_total).reshape(-1)
 
         # ---- SDF + gradient (create_graph for eikonal BP) --------------
+        # Always fp32: AMP here overflows / produces NaNs with positional encoding + second derivatives.
         with autocast("cuda", enabled=False):
             pts_flat = pts.reshape(-1, 3).detach().requires_grad_(True)
             if feat_maps is not None and input_c2ws is not None:
@@ -338,9 +339,41 @@ class PRISM(nn.Module):
             else:
                 l_sdf_back = sdf_valid.sum() * 0.0
             l_sdf_sign = l_sdf_front + l_sdf_back
+
+            # Local sign supervision at narrow bands around GT depth:
+            # sample SDF at d-δ (outside, should be +) and d+δ (inside, should be -).
+            delta = max(float(getattr(cfg, "sdf_band_delta", 0.03)), dt)
+            d_front = (gd_valid - delta).clamp(min=near, max=far)
+            d_back  = (gd_valid + delta).clamp(min=near, max=far)
+            ro_v = rays_o[valid_d]
+            rd_v = rays_d[valid_d]
+            p_front = ro_v + d_front[:, None] * rd_v
+            p_back  = ro_v + d_back[:, None] * rd_v
+            z_v = z_rays[valid_d]
+            bidx_v = bidx[valid_d]
+
+            with autocast("cuda", enabled=False):
+                if feat_maps is not None and input_c2ws is not None:
+                    lf_front = self._project_features(
+                        p_front, bidx_v,
+                        input_c2ws.float(), input_Ks.float(),
+                        feat_maps, (H, W),
+                    )
+                    lf_back = self._project_features(
+                        p_back, bidx_v,
+                        input_c2ws.float(), input_Ks.float(),
+                        feat_maps, (H, W),
+                    )
+                else:
+                    lf_front = None
+                    lf_back = None
+                sdf_front = self.sdf_mlp(p_front, z_v, lf_front).squeeze(-1)
+                sdf_back = self.sdf_mlp(p_back, z_v, lf_back).squeeze(-1)
+            l_sdf_band = F.softplus(-sdf_front).mean() + F.softplus(sdf_back).mean()
         else:
             l_sdf_surface = sdf_vals.sum() * 0.0
             l_sdf_sign = sdf_vals.sum() * 0.0
+            l_sdf_band = sdf_vals.sum() * 0.0
 
         # Normal loss — valid (non-background) GT normals
         valid_n = gt_n.norm(dim=-1) > 0.5
@@ -381,6 +414,7 @@ class PRISM(nn.Module):
             + cfg.lambda_eik         * l_eikonal
             + cfg.lambda_sdf_surface * l_sdf_surface
             + cfg.lambda_sdf_sign    * l_sdf_sign
+            + cfg.lambda_sdf_band    * l_sdf_band
             + cfg.lambda_sil_bce     * l_sil_bce
             + cfg.lambda_sil_dice    * l_sil_dice
             + cfg.lambda_light_facing * l_light_facing
@@ -396,6 +430,7 @@ class PRISM(nn.Module):
             "eikonal":     l_eikonal.detach(),
             "sdf_surface": l_sdf_surface.detach(),
             "sdf_sign":    l_sdf_sign.detach(),
+            "sdf_band":    l_sdf_band.detach(),
             "sil_bce":     l_sil_bce.detach(),
             "sil_dice":    l_sil_dice.detach(),
             "light_facing": l_light_facing.detach(),
@@ -506,7 +541,7 @@ class PRISM(nn.Module):
                 pf  = pts_chunk.requires_grad_(True)
                 sf2 = self.sdf_mlp(pf, zp, lf).squeeze(-1)
                 g   = torch.autograd.grad(sf2, pf, torch.ones_like(sf2))[0]
-            g = g.reshape(n, n_s, 3)
+            g = g.reshape(n, n_tot, 3)
 
             w  = neus_weights(sf.detach(), self.beta, t)
             w_sum = w.sum(-1)

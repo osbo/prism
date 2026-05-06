@@ -22,6 +22,8 @@ The dataset returns one (object, view) per sample; a random view is chosen in __
 """
 
 import json
+import hashlib
+import os
 import random
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -32,6 +34,90 @@ import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
+
+_INDEX_CACHE_VERSION = 1
+_INDEX_MEMO: Dict[str, Dict[str, Any]] = {}
+
+
+def _cache_dir() -> Path:
+    return Path.home() / ".cache" / "prism" / "omniobject3d"
+
+
+def _root_id(path: Path) -> str:
+    return hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:16]
+
+
+def _quick_signature(root: Path) -> str:
+    """
+    Cheap invalidation signature from immediate children metadata.
+    Avoids expensive deep hashing while catching common dataset updates.
+    """
+    parts: List[str] = [str(root.resolve())]
+    try:
+        st_root = root.stat()
+        parts.append(f"root:{st_root.st_mtime_ns}:{st_root.st_size}")
+    except OSError:
+        parts.append("root:missing")
+    try:
+        for de in sorted(os.scandir(root), key=lambda x: x.name):
+            if not de.is_dir(follow_symlinks=False):
+                continue
+            try:
+                st = de.stat(follow_symlinks=False)
+                parts.append(f"{de.name}:{st.st_mtime_ns}:{st.st_size}")
+            except OSError:
+                parts.append(f"{de.name}:err")
+    except OSError:
+        parts.append("scan:err")
+    s = "|".join(parts).encode("utf-8")
+    return hashlib.sha1(s).hexdigest()
+
+
+def _cache_file(layout: str, render_root: Path) -> Path:
+    return _cache_dir() / f"{layout}-{_root_id(render_root.resolve())}.json"
+
+
+def _serialize_entry(layout: str, payload: Dict[str, Any], signature: str, render_root: Path) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "version": _INDEX_CACHE_VERSION,
+        "layout": layout,
+        "render_root": str(render_root.resolve()),
+        "signature": signature,
+        "objects": [[c, o] for (c, o) in payload["objects"]],
+    }
+    if layout == "extracted":
+        meta_out: Dict[str, Any] = {}
+        for (cat, oid), m in payload["meta"].items():
+            meta_out[f"{cat}|{oid}"] = {
+                "render_dir": str(m["render_dir"]),
+                "frames": m["frames"],
+                "camera_angle_x": float(m["camera_angle_x"]),
+                "wh": [int(m["wh"][0]), int(m["wh"][1])],
+            }
+        out["meta"] = meta_out
+    return out
+
+
+def _deserialize_entry(layout: str, raw: Dict[str, Any]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "objects": [(str(c), str(o)) for c, o in raw.get("objects", [])],
+        "meta": {},
+    }
+    if layout == "extracted":
+        meta_raw = raw.get("meta", {})
+        meta: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for k, m in meta_raw.items():
+            if "|" not in k:
+                continue
+            cat, oid = k.split("|", 1)
+            meta[(cat, oid)] = {
+                "render_dir": Path(m["render_dir"]),
+                "frames": m["frames"],
+                "camera_angle_x": float(m["camera_angle_x"]),
+                "wh": (int(m["wh"][0]), int(m["wh"][1])),
+            }
+        payload["meta"] = meta
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +278,91 @@ def _scale_K(K: np.ndarray, orig_wh: Tuple[int, int], new_wh: Tuple[int, int]) -
     return Ks.astype(np.float32)
 
 
+def _build_index(layout: str, render_root: Path) -> Dict[str, Any]:
+    if layout == "preprocessed":
+        objects: List[Tuple[str, str]] = []
+        for cat_dir in sorted(render_root.iterdir()):
+            if not cat_dir.is_dir():
+                continue
+            for obj_dir in sorted(cat_dir.iterdir()):
+                if not obj_dir.is_dir():
+                    continue
+                if _rgb_path(obj_dir, 0).exists():
+                    objects.append((cat_dir.name, obj_dir.name))
+        return {"objects": objects, "meta": {}}
+
+    # extracted layout
+    objects = []
+    meta: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for oid_dir in sorted(render_root.iterdir()):
+        if not oid_dir.is_dir():
+            continue
+        obj_id = oid_dir.name
+        cat = _infer_category(obj_id)
+        render_dir = oid_dir / "render"
+        tpath = render_dir / "transforms.json"
+        if not tpath.exists():
+            continue
+        with open(tpath) as f:
+            meta_json = json.load(f)
+        frames: List = meta_json.get("frames") or []
+        if not frames:
+            continue
+        fp0 = frames[0]["file_path"]
+        rgb0 = render_dir / "images" / f"{fp0}.png"
+        if not rgb0.exists():
+            continue
+        with Image.open(rgb0) as im:
+            w, h = im.size
+        cam_ax = float(meta_json["camera_angle_x"])
+        key = (cat, obj_id)
+        meta[key] = {
+            "render_dir": render_dir,
+            "frames": frames,
+            "camera_angle_x": cam_ax,
+            "wh": (w, h),
+        }
+        objects.append((cat, obj_id))
+    return {"objects": objects, "meta": meta}
+
+
+def _get_index_cached(layout: str, render_root: Path) -> Dict[str, Any]:
+    signature = _quick_signature(render_root)
+    memo_key = f"{layout}|{render_root.resolve()}|{signature}"
+    if memo_key in _INDEX_MEMO:
+        cached = _INDEX_MEMO[memo_key]
+        return {"objects": list(cached["objects"]), "meta": dict(cached["meta"])}
+
+    cfile = _cache_file(layout, render_root)
+    payload: Optional[Dict[str, Any]] = None
+    try:
+        if cfile.exists():
+            with open(cfile) as f:
+                raw = json.load(f)
+            if (
+                raw.get("version") == _INDEX_CACHE_VERSION
+                and raw.get("layout") == layout
+                and raw.get("signature") == signature
+                and raw.get("render_root") == str(render_root.resolve())
+            ):
+                payload = _deserialize_entry(layout, raw)
+    except Exception:
+        payload = None
+
+    if payload is None:
+        payload = _build_index(layout, render_root)
+        try:
+            cdir = _cache_dir()
+            cdir.mkdir(parents=True, exist_ok=True)
+            with open(cfile, "w") as f:
+                json.dump(_serialize_entry(layout, payload, signature, render_root), f)
+        except Exception:
+            pass
+
+    _INDEX_MEMO[memo_key] = payload
+    return {"objects": list(payload["objects"]), "meta": dict(payload["meta"])}
+
+
 def enumerate_object_pairs(
     data_root: str | Path,
     categories: Optional[List[str]] = None,
@@ -204,41 +375,16 @@ def enumerate_object_pairs(
     pre_root = data_root / "blender_renders_24_views"
     ext_root = data_root / "blender_renders"
     if pre_root.is_dir():
-        objects: List[Tuple[str, str]] = []
-        for cat_dir in sorted(pre_root.iterdir()):
-            if not cat_dir.is_dir():
-                continue
-            if categories and cat_dir.name not in categories:
-                continue
-            for obj_dir in sorted(cat_dir.iterdir()):
-                if not obj_dir.is_dir():
-                    continue
-                if _rgb_path(obj_dir, 0).exists():
-                    objects.append((cat_dir.name, obj_dir.name))
+        objects = _get_index_cached("preprocessed", pre_root)["objects"]
+        if categories:
+            cset = set(categories)
+            objects = [o for o in objects if o[0] in cset]
         return objects
     if ext_root.is_dir():
-        objects = []
-        for oid_dir in sorted(ext_root.iterdir()):
-            if not oid_dir.is_dir():
-                continue
-            obj_id = oid_dir.name
-            cat = _infer_category(obj_id)
-            if categories and cat not in categories:
-                continue
-            render_dir = oid_dir / "render"
-            tpath = render_dir / "transforms.json"
-            if not tpath.exists():
-                continue
-            with open(tpath) as f:
-                meta_json = json.load(f)
-            frames: List = meta_json.get("frames") or []
-            if not frames:
-                continue
-            fp0 = frames[0]["file_path"]
-            rgb0 = render_dir / "images" / f"{fp0}.png"
-            if not rgb0.exists():
-                continue
-            objects.append((cat, obj_id))
+        objects = _get_index_cached("extracted", ext_root)["objects"]
+        if categories:
+            cset = set(categories)
+            objects = [o for o in objects if o[0] in cset]
         return objects
     raise FileNotFoundError(
         f"OmniObject3D data not found under {data_root}: "
@@ -348,53 +494,22 @@ class OmniObject3DDataset(Dataset):
             raise ValueError("virtual_epoch_len must be >= 1 when set")
 
     def _enumerate_preprocessed(self, categories: Optional[List[str]]) -> List[Tuple[str, str]]:
-        objects: List[Tuple[str, str]] = []
-        for cat_dir in sorted(self.render_root.iterdir()):
-            if not cat_dir.is_dir():
-                continue
-            if categories and cat_dir.name not in categories:
-                continue
-            for obj_dir in sorted(cat_dir.iterdir()):
-                if not obj_dir.is_dir():
-                    continue
-                if _rgb_path(obj_dir, 0).exists():
-                    objects.append((cat_dir.name, obj_dir.name))
+        payload = _get_index_cached("preprocessed", self.render_root)
+        objects: List[Tuple[str, str]] = payload["objects"]
+        if categories:
+            cset = set(categories)
+            objects = [o for o in objects if o[0] in cset]
         return objects
 
     def _enumerate_extracted(self, categories: Optional[List[str]]) -> List[Tuple[str, str]]:
-        objects: List[Tuple[str, str]] = []
-        self._extracted_meta.clear()
-        for oid_dir in sorted(self.render_root.iterdir()):
-            if not oid_dir.is_dir():
-                continue
-            obj_id = oid_dir.name
-            cat = _infer_category(obj_id)
-            if categories and cat not in categories:
-                continue
-            render_dir = oid_dir / "render"
-            tpath = render_dir / "transforms.json"
-            if not tpath.exists():
-                continue
-            with open(tpath) as f:
-                meta_json = json.load(f)
-            frames: List = meta_json.get("frames") or []
-            if not frames:
-                continue
-            fp0 = frames[0]["file_path"]
-            rgb0 = render_dir / "images" / f"{fp0}.png"
-            if not rgb0.exists():
-                continue
-            with Image.open(rgb0) as im:
-                w, h = im.size
-            cam_ax = float(meta_json["camera_angle_x"])
-            key = (cat, obj_id)
-            self._extracted_meta[key] = {
-                "render_dir": render_dir,
-                "frames": frames,
-                "camera_angle_x": cam_ax,
-                "wh": (w, h),
-            }
-            objects.append((cat, obj_id))
+        payload = _get_index_cached("extracted", self.render_root)
+        objects = payload["objects"]
+        meta = payload["meta"]
+        if categories:
+            cset = set(categories)
+            objects = [o for o in objects if o[0] in cset]
+        keep = set(objects)
+        self._extracted_meta = {k: v for k, v in meta.items() if k in keep}
         return objects
 
     def _auto_split(self, objects: list, split: str) -> list:

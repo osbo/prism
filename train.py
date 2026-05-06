@@ -177,7 +177,6 @@ def train(
             loss = losses["total"]
             if not torch.isfinite(loss).all():
                 log.warning("non-finite loss at step %d — skipping batch", step)
-                scaler.update()
                 step += 1
                 continue
 
@@ -211,13 +210,14 @@ def train(
                 t_prev = t_now
                 log.info(
                     "[%d/%d] step=%d  total=%.4f  render=%.4f  depth=%.4f  "
-                    "normal=%.4f  eik=%.4f  sdf0=%.4f  sdf_sign=%.4f  bg_sdf=%.4f  "
+                    "normal=%.4f  eik=%.4f  sdf0=%.4f  sdf_sign=%.4f  sdf_band=%.4f  bg_sdf=%.4f  "
                     "bg_alpha=%.4f  sil_bce=%.4f  sil_dice=%.4f  lface=%.4f  close=%.4f  β=%.3f  lr=%.1e  %s",
                     epoch, end_epoch, step,
                     losses["total"].item(), losses["render"].item(),
                     losses["depth"].item(), losses["normal"].item(),
                     losses["eikonal"].item(),
                     losses["sdf_surface"].item(), losses["sdf_sign"].item(),
+                    losses["sdf_band"].item(),
                     losses["bg_sdf"].item(),
                     losses["bg_alpha"].item(),
                     losses["sil_bce"].item(),

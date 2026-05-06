@@ -117,6 +117,27 @@ def m_sdf_sign(sdf, t, gt_d, near, far):
     return {"status": status, "correct_frac": cf, "front": fm, "back": bm, "inverted": inverted}
 
 
+def m_sdf_band_sign(sdf_front: torch.Tensor, sdf_back: torch.Tensor):
+    """
+    Training-aligned local sign check at d-δ / d+δ:
+      front should be positive, back should be negative.
+    """
+    if sdf_front.numel() == 0:
+        return {"status": WARN, "note": "no valid GT rays"}
+    sf = sdf_front.detach().cpu()
+    sb = sdf_back.detach().cpu()
+    correct = ((sf > 0) & (sb < 0)).float().mean().item()
+    margin = (sf - sb).mean().item()
+    status = PASS if correct > 0.65 else FAIL if correct < 0.35 else WARN
+    return {
+        "status": status,
+        "correct_frac": correct,
+        "front": sf.mean().item(),
+        "back": sb.mean().item(),
+        "margin": margin,
+    }
+
+
 def m_depth(pred_d, gt_d, near, far):
     hit = pred_d > near * 0.9
     valid = (gt_d > near) & (gt_d < far)
@@ -199,9 +220,37 @@ def m_mask(model, batch, cfg, device):
     tp = int((pred_fg & gt_fg).sum()); fp = int((pred_fg & ~gt_fg).sum())
     fn = int((~pred_fg & gt_fg).sum())
     iou = tp / (tp + fp + fn + 1e-8)
+
+    def _erode3x3(mask: np.ndarray) -> np.ndarray:
+        h, w = mask.shape
+        p = np.pad(mask, 1, mode="constant", constant_values=False)
+        out = np.ones_like(mask, dtype=bool)
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                out &= p[1 + dy:1 + dy + h, 1 + dx:1 + dx + w]
+        return out
+
+    def _dilate3x3(mask: np.ndarray) -> np.ndarray:
+        h, w = mask.shape
+        p = np.pad(mask, 1, mode="constant", constant_values=False)
+        out = np.zeros_like(mask, dtype=bool)
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                out |= p[1 + dy:1 + dy + h, 1 + dx:1 + dx + w]
+        return out
+
+    gt_b = gt_fg & (~_erode3x3(gt_fg))
+    pr_b = pred_fg & (~_erode3x3(pred_fg))
+    gt_b_d = _dilate3x3(gt_b)
+    pr_b_d = _dilate3x3(pr_b)
+    b_prec = float((pr_b & gt_b_d).sum() / (pr_b.sum() + 1e-8))
+    b_rec = float((gt_b & pr_b_d).sum() / (gt_b.sum() + 1e-8))
+    b_f1 = float((2 * b_prec * b_rec) / (b_prec + b_rec + 1e-8))
+
     status = PASS if iou > 0.60 else FAIL if iou < 0.35 else WARN
     return {"status": status, "iou": iou,
-            "prec": tp/(tp+fp+1e-8), "rec": tp/(tp+fn+1e-8)}
+            "prec": tp/(tp+fp+1e-8), "rec": tp/(tp+fn+1e-8),
+            "b_prec": b_prec, "b_rec": b_rec, "b_f1": b_f1}
 
 
 def m_z_diversity(z_list):
@@ -264,6 +313,14 @@ def print_results(obj_id, metrics):
         log.info(row("sdf_sign", s,
                      f"correct={s['correct_frac']:.0%}  front={s['front']:+.2f}  back={s['back']:+.2f}{inv}"))
 
+    sb = mk["sdf_band"]
+    if "note" in sb:
+        log.info(row("sdf_band", sb, sb["note"]))
+    else:
+        log.info(row("sdf_band", sb,
+                     f"correct={sb['correct_frac']:.0%}  front={sb['front']:+.2f}  "
+                     f"back={sb['back']:+.2f}  margin={sb['margin']:+.2f}"))
+
     d = mk["depth"]
     if "note" in d:
         log.info(row("depth", d, d["note"]))
@@ -288,7 +345,8 @@ def print_results(obj_id, metrics):
         log.info(row("mask", msk, msk["note"]))
     else:
         log.info(row("mask", msk,
-                     f"IoU={msk['iou']:.2f}  prec={msk['prec']:.2f}  rec={msk['rec']:.2f}"))
+                     f"IoU={msk['iou']:.2f}  prec={msk['prec']:.2f}  rec={msk['rec']:.2f}  "
+                     f"bF1={msk['b_f1']:.2f}"))
 
 
 def action_plan(all_metrics, cfg):
@@ -441,7 +499,7 @@ def run_debug(cfg, n_objects=1, restrict_object_ids=None):
         B, N_views, _, H, W = images.shape
 
         with torch.no_grad():
-            z, _ = model.encoder(images)    # z: (B, latent_dim)
+            z, feat_maps = model.encoder(images)    # z: (B, latent_dim)
         z_list.append(z.cpu())
 
         near, far = cfg.near, cfg.far
@@ -457,10 +515,19 @@ def run_debug(cfg, n_objects=1, restrict_object_ids=None):
 
         # Per-ray latent: index by bidx (which batch element each ray belongs to).
         z_pts = z[bidx][:, None].expand(-1, cfg.n_samples, -1).reshape(-1, z.shape[-1])
+        bidx_pts = bidx[:, None].expand(-1, cfg.n_samples).reshape(-1)
 
         pf = pts.reshape(-1, 3).requires_grad_(True)
+        if feat_maps is not None:
+            lf = model._project_features(
+                pf.detach(), bidx_pts,
+                input_c2ws.float(), input_Ks.float(),
+                feat_maps.float(), (H, W),
+            )
+        else:
+            lf = None
         with torch.enable_grad():
-            sf = model.sdf_mlp(pf, z_pts.detach()).squeeze(-1)
+            sf = model.sdf_mlp(pf, z_pts.detach(), lf).squeeze(-1)
             sg = torch.autograd.grad(sf, pf, torch.ones_like(sf))[0]
         sdf_v = sf.detach().reshape(Nr, cfg.n_samples)
         norms = sg.detach().reshape(Nr, cfg.n_samples, 3)
@@ -480,6 +547,35 @@ def run_debug(cfg, n_objects=1, restrict_object_ids=None):
             gt_nor = gt_n.permute(0, 2, 3, 1)[bidx, r_idx, c_idx]           # (Nr, 3)
             valid  = (gt_dep > near) & (gt_dep < far)
 
+        delta = float(getattr(cfg, "sdf_band_delta", 0.03))
+        if valid.any():
+            d_front = (gt_dep[valid] - delta).clamp(min=near, max=far)
+            d_back = (gt_dep[valid] + delta).clamp(min=near, max=far)
+            p_front = rays_o[valid] + d_front[:, None] * rays_d[valid]
+            p_back = rays_o[valid] + d_back[:, None] * rays_d[valid]
+            z_v = z[bidx][valid]
+            bidx_v = bidx[valid]
+            with torch.no_grad():
+                if feat_maps is not None:
+                    lf_front = model._project_features(
+                        p_front, bidx_v,
+                        input_c2ws.float(), input_Ks.float(),
+                        feat_maps.float(), (H, W),
+                    )
+                    lf_back = model._project_features(
+                        p_back, bidx_v,
+                        input_c2ws.float(), input_Ks.float(),
+                        feat_maps.float(), (H, W),
+                    )
+                else:
+                    lf_front = None
+                    lf_back = None
+                sdf_front = model.sdf_mlp(p_front, z_v, lf_front).squeeze(-1)
+                sdf_back = model.sdf_mlp(p_back, z_v, lf_back).squeeze(-1)
+        else:
+            sdf_front = torch.empty(0, device=device)
+            sdf_back = torch.empty(0, device=device)
+
         metrics = {
             "eikonal":     m_eikonal(model, z[0], cfg, device),
             "sharpness":   m_sharpness(w.cpu(), t_v.cpu()),
@@ -487,6 +583,7 @@ def run_debug(cfg, n_objects=1, restrict_object_ids=None):
             "depth_hit":   m_depth_hit(w_sum, gt_dep, near, far, cfg.depth_hit_w_sum_thresh),
             "sdf_at_surf": m_sdf_at_surface(sdf_v.cpu(), t_v.cpu(), gt_dep.cpu(), near, far),
             "sdf_sign":    m_sdf_sign(sdf_v.cpu(), t_v.cpu(), gt_dep.cpu(), near, far),
+            "sdf_band":    m_sdf_band_sign(sdf_front, sdf_back),
             "depth":       m_depth(pred_d, gt_dep, near, far),
             "normals":     m_normals(pred_n, gt_nor),
             "light":       m_light(model, z[0], pred_n, pred_d,
