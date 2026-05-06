@@ -15,13 +15,13 @@ class PRISMConfig:
     pretrained_encoder: bool = True
     sdf_hidden:        int   = 256
     sdf_layers:        int   = 8
-    n_freqs:           int   = 6    # Fourier positional encoding frequencies (high values → checkerboard)
+    n_freqs:           int   = 5    # Fourier positional encoding frequencies (high values → checkerboard)
     # Sphere initialization (not a structural restriction).
     sdf_init_radius:   float = 0.35
 
     # Rendering
-    n_rays:    int   = 128          # rays sampled per image per training step
-    n_samples: int   = 64           # samples along each ray
+    n_rays:    int   = 512          # rays sampled per image per training step
+    n_samples: int   = 96           # samples along each ray
     n_importance: int = 24          # hierarchical fine samples per ray (NeUS importance resampling)
     near:      float = 0.5
     far:       float = 6.0
@@ -29,7 +29,7 @@ class PRISMConfig:
     # (avoids picking a spurious bin when weights are noise).
     depth_hit_w_sum_thresh: float = 0.15
     # Hard clamp raw SDF logits before NeuS sigmoid (fp32 path; improves AMP stability).
-    sdf_clamp: float = 80.0
+    sdf_clamp: float = 5.0
 
     # Loss weights
     lambda_render: float = 1.0
@@ -57,8 +57,8 @@ class PRISMConfig:
     sil_sdf_tau:        float = 0.02
     # NeuS sharpness: annealed upper bound forces surface to sharpen over training.
     beta_min:           float = 0.01
-    beta_anneal_start:  float = 0.0  # max beta at step 0 (soft surface)
-    beta_anneal_end:    float = 0.00  # max beta at end of training (sharp surface)
+    beta_anneal_start:  float = 0.5   # max beta at step 0 (soft surface)
+    beta_anneal_end:    float = 0.01  # max beta at end of training (sharp surface)
 
     # Training
     n_epochs:       int   = 100
@@ -78,11 +78,17 @@ class PRISMConfig:
     save_every:     int   = 5       # epochs — periodic checkpoint
     eval_every:     int   = 5       # epochs — val + best-on-val (same cadence)
 
+    # Curvature regularization: Hutchinson trace estimator of the SDF Hessian.
+    # Penalizes large Laplacians which drive banding and high-frequency oscillations.
+    lambda_curvature: float = 0.01
+    curvature_n_pts:  int   = 512   # points subsampled per step for the Hessian trace
+
     # Evaluation / mesh export
     # Higher resolution reduces axis-aligned marching-cubes stairsteps on curved surfaces.
     mc_resolution: int   = 192      # was 128; ↑ for smoother meshes (slower ~ (res/128)³)
     mc_threshold:  float = 0.0
     mc_bound:      float = 2.5      # [-bound, bound]^3 for marching cubes
+    mc_laplacian_iters: int = 5     # Laplacian smoothing passes post-MC (0 = off)
     # If True: push SDF outside where grid points project to GT background (view-conditioned).
     # Set False to export raw marching cubes without mask carve.
     mc_carve_background: bool = False
@@ -91,7 +97,14 @@ class PRISMConfig:
     # Blur GT mask before carving + soft blend (reduces harsh voxel-aligned “steps” at carve boundary).
     mc_carve_mask_blur_radius: int = 2   # 0 = hard silhouette (more stairsteps); 2 ≈ 5×5 Gaussian
 
+    # Visual hull: any sampled point outside the mask in any input view must have SDF > 0.
+    # This hard-encodes multi-view silhouette geometry so the model needn't re-discover it.
+    # Keep below lambda_sdf_sign (0.5) * ~3 so the interior sign losses can still form the
+    # negative SDF region needed for marching cubes zero crossings.
+    lambda_visual_hull:  float = 1.5
+    visual_hull_margin:  float = 0.02   # same scale as bg_sdf_margin
+
     # Light-facing penalty: push n·l > 0 so render loss provides non-zero gradients.
-    lambda_light_facing: float = 0.6
+    lambda_light_facing: float = 1.0
     fscore_tau:    float = 0.01
     n_eval_pts:    int   = 100_000

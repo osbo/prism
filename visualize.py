@@ -186,8 +186,9 @@ def visualize(
                 ext = "obj"
             mesh_path = mdir / f"{obj_id}.{ext}"
             with torch.no_grad():
-                z_latent, _ = model.encoder(images)
-                z_latent    = z_latent[0]
+                z_latent, feat_maps = model.encoder(images)
+                z_latent = z_latent[0]
+            H, W = images.shape[-2], images.shape[-1]
             mc = extract_sdf_mesh(
                 model,
                 z_latent,
@@ -196,6 +197,11 @@ def visualize(
                 mask_hw=batch["mask"][0],
                 c2w=batch["c2w"].to(device),
                 K=batch["K"].to(device),
+                input_masks=batch.get("input_masks").to(device) if "input_masks" in batch else None,
+                input_c2ws=input_c2ws,
+                input_Ks=input_Ks,
+                feat_maps=feat_maps,
+                img_hw=(H, W),
             )
             if mc is None:
                 log.warning("  no SDF iso-surface for %s (skipped mesh)", obj_id)

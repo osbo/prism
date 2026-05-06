@@ -64,6 +64,7 @@ def validate(model, loader, device):
             gt_mask=batch["mask"].to(device),
             input_c2ws=batch["input_c2ws"].to(device),
             input_Ks=batch["input_Ks"].to(device),
+            input_masks=batch.get("input_masks", batch["mask"].unsqueeze(1)).to(device),
         )
         total += losses["total"].item()
         n += 1
@@ -160,19 +161,21 @@ def train(
             for pg in opt.param_groups:
                 pg["lr"] = pg["initial_lr"] * scale
 
-            images      = batch["images"].to(device, non_blocking=True)
-            depth       = batch["depth"].to(device, non_blocking=True)
-            normal      = batch["normal"].to(device, non_blocking=True)
-            mask        = batch["mask"].to(device, non_blocking=True)
-            c2w         = batch["c2w"].to(device, non_blocking=True)
-            K           = batch["K"].to(device, non_blocking=True)
-            input_c2ws  = batch["input_c2ws"].to(device, non_blocking=True)
-            input_Ks    = batch["input_Ks"].to(device, non_blocking=True)
+            images       = batch["images"].to(device, non_blocking=True)
+            depth        = batch["depth"].to(device, non_blocking=True)
+            normal       = batch["normal"].to(device, non_blocking=True)
+            mask         = batch["mask"].to(device, non_blocking=True)
+            c2w          = batch["c2w"].to(device, non_blocking=True)
+            K            = batch["K"].to(device, non_blocking=True)
+            input_c2ws   = batch["input_c2ws"].to(device, non_blocking=True)
+            input_Ks     = batch["input_Ks"].to(device, non_blocking=True)
+            input_masks  = batch.get("input_masks", batch["mask"].unsqueeze(1)).to(device, non_blocking=True)
 
             opt.zero_grad(set_to_none=True)
             with autocast("cuda", enabled=(device.type == "cuda")):
                 losses = model(images, c2w, K, depth, normal, gt_mask=mask,
-                               input_c2ws=input_c2ws, input_Ks=input_Ks)
+                               input_c2ws=input_c2ws, input_Ks=input_Ks,
+                               input_masks=input_masks)
 
             loss = losses["total"]
             if not torch.isfinite(loss).all():
@@ -210,18 +213,20 @@ def train(
                 t_prev = t_now
                 log.info(
                     "[%d/%d] step=%d  total=%.4f  render=%.4f  depth=%.4f  "
-                    "normal=%.4f  eik=%.4f  sdf0=%.4f  sdf_sign=%.4f  sdf_band=%.4f  bg_sdf=%.4f  "
-                    "bg_alpha=%.4f  sil_bce=%.4f  sil_dice=%.4f  lface=%.4f  close=%.4f  β=%.3f  lr=%.1e  %s",
+                    "normal=%.4f  eik=%.4f  curv=%.4f  sdf0=%.4f  sdf_sign=%.4f  sdf_band=%.4f  bg_sdf=%.4f  "
+                    "bg_alpha=%.4f  sil_bce=%.4f  sil_dice=%.4f  hull=%.4f  lface=%.4f  close=%.4f  β=%.3f  lr=%.1e  %s",
                     epoch, end_epoch, step,
                     losses["total"].item(), losses["render"].item(),
                     losses["depth"].item(), losses["normal"].item(),
                     losses["eikonal"].item(),
+                    losses["curvature"].item(),
                     losses["sdf_surface"].item(), losses["sdf_sign"].item(),
                     losses["sdf_band"].item(),
                     losses["bg_sdf"].item(),
                     losses["bg_alpha"].item(),
                     losses["sil_bce"].item(),
                     losses["sil_dice"].item(),
+                    losses["visual_hull"].item(),
                     losses["light_facing"].item(),
                     losses["closure"].item(),
                     model.beta.item(),

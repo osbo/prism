@@ -104,6 +104,62 @@ def _carve_blend_weight(
     return w
 
 
+def _multiview_carve_weight(
+    pts: torch.Tensor,
+    input_c2ws: torch.Tensor,
+    input_Ks: torch.Tensor,
+    input_masks: torch.Tensor,
+    mask_blur_radius: int,
+) -> torch.Tensor:
+    """
+    Per-grid-point carve weight from all input views.  A point outside the foreground
+    mask in ANY view gets w=1 (fully carved); inside all views gets w=0 (unchanged).
+
+    input_c2ws:  (Nv, 4, 4)
+    input_Ks:    (Nv, 3, 3)
+    input_masks: (Nv, 1, H, W)
+    Returns:     (N_pts,) in [0, 1]
+    """
+    Nv = input_c2ws.shape[0]
+    dtype = pts.dtype
+    # min mask value across all views (0 = outside in ≥1 view)
+    min_sampled = torch.ones(pts.shape[0], device=pts.device, dtype=dtype)
+    for k in range(Nv):
+        c2w_k = input_c2ws[k].to(device=pts.device, dtype=dtype)
+        K_k   = input_Ks[k].to(device=pts.device, dtype=dtype)
+        mask_k = input_masks[k].to(device=pts.device, dtype=dtype)   # (1, H, W)
+        _, H, W = mask_k.shape
+        if mask_blur_radius > 0:
+            mask_k = _blur_mask_hw(mask_k[0], mask_blur_radius).unsqueeze(0)
+
+        R = c2w_k[:3, :3]
+        t = c2w_k[:3, 3]
+        pc = torch.matmul(pts - t.unsqueeze(0), R)
+
+        # Blender: forward = -Z; visible points have pc[:,2] < 0
+        eps = 1e-5
+        in_front = pc[:, 2] < -eps
+        z_c = (-pc[:, 2]).clamp(min=eps)
+        fx, fy = K_k[0, 0], K_k[1, 1]
+        cx, cy = K_k[0, 2], K_k[1, 2]
+        u = cx + fx * (pc[:, 0] / z_c)
+        v = cy - fy * (pc[:, 1] / z_c)   # negate y: camera +Y up, image +Y down
+
+        u_n = u / (W - 1) * 2.0 - 1.0
+        v_n = v / (H - 1) * 2.0 - 1.0
+        grid = torch.stack([u_n, v_n], dim=-1).view(1, 1, -1, 2)
+        sampled = F.grid_sample(
+            mask_k.unsqueeze(0), grid, mode="bilinear",
+            padding_mode="zeros", align_corners=True,
+        ).view(-1).clamp(0.0, 1.0)
+        # Behind-camera or out-of-frustum: treat as foreground (don't carve)
+        sampled = torch.where(in_front, sampled, torch.ones_like(sampled))
+        min_sampled = torch.minimum(min_sampled, sampled)
+
+    # carve weight: 1 where outside hull, 0 where inside all views
+    return (1.0 - min_sampled).clamp(0.0, 1.0)
+
+
 def extract_sdf_mesh(
     model,
     z: torch.Tensor,
@@ -112,20 +168,21 @@ def extract_sdf_mesh(
     mask_hw: torch.Tensor | None = None,
     c2w: torch.Tensor | None = None,
     K: torch.Tensor | None = None,
+    input_masks: torch.Tensor | None = None,
+    input_c2ws: torch.Tensor | None = None,
+    input_Ks: torch.Tensor | None = None,
+    feat_maps: torch.Tensor | None = None,
+    img_hw: tuple[int, int] | None = None,
 ):
     """
     Build a triangle mesh at SDF iso-level ``cfg.mc_threshold``.
 
     Parameters
     ----------
-    model :
-        Must expose ``model.sdf_mlp(pts, z_batch) -> (N, 1)`` SDF values.
-    z :
-        Latent ``(latent_dim,)`` on ``device``.
-    mask_hw, c2w, K :
-        If all set and ``cfg.mc_carve_background``, SDF is raised where the grid
-        point projects to GT background (or outside the frustum), removing
-        spurious sheets from ``.obj`` export for that view.
+    feat_maps : (1, Nv, C, Hf, Wf) or (Nv, C, Hf, Wf) — per-view feature maps from
+        the encoder.  When provided (along with input_c2ws / input_Ks / img_hw), SDF
+        grid points are evaluated with the same per-point projected features used
+        during training, avoiding a train/eval mismatch when feat_dim > 0.
     """
     try:
         from skimage.measure import marching_cubes
@@ -141,29 +198,62 @@ def extract_sdf_mesh(
     chunk = 32768
     z_single = z.unsqueeze(0).expand(chunk, -1)
 
+    # Prepare feature projection if feat_maps provided (avoids train/eval mismatch).
+    use_feats = (
+        feat_maps is not None
+        and input_c2ws is not None
+        and input_Ks is not None
+        and img_hw is not None
+        and hasattr(model, "_project_features")
+    )
+    if use_feats:
+        # Ensure (1, Nv, C, Hf, Wf) shape for _project_features
+        fm = feat_maps if feat_maps.dim() == 5 else feat_maps.unsqueeze(0)
+        ic = input_c2ws if input_c2ws.dim() == 4 else input_c2ws.unsqueeze(0)
+        ik = input_Ks   if input_Ks.dim() == 4   else input_Ks.unsqueeze(0)
+
     sdf_chunks = []
     with torch.no_grad():
         for i in range(0, pts.shape[0], chunk):
             p = pts[i : i + chunk]
             zc = z_single[: p.shape[0]]
-            sdf_chunks.append(model.sdf_mlp(p, zc).squeeze(-1))
+            if use_feats:
+                bidx = torch.zeros(p.shape[0], dtype=torch.long, device=device)
+                lf = model._project_features(p, bidx, ic.float(), ik.float(), fm.float(), img_hw)
+            else:
+                lf = None
+            sdf_chunks.append(model.sdf_mlp(p, zc, lf).squeeze(-1))
 
         sdf_flat = torch.cat(sdf_chunks)
 
-        do_carve = (
+        blur_r = int(getattr(cfg, "mc_carve_mask_blur_radius", 2))
+        smin   = float(getattr(cfg, "mc_carve_sdf_min", 0.35))
+        smin_t = sdf_flat.new_tensor(smin)
+
+        multi_view_available = (
+            input_masks is not None
+            and input_c2ws is not None
+            and input_Ks is not None
+        )
+        single_view_available = (
             getattr(cfg, "mc_carve_background", False)
             and mask_hw is not None
             and c2w is not None
             and K is not None
         )
-        if do_carve:
-            m = _mask_hw(mask_hw)
-            blur_r = int(getattr(cfg, "mc_carve_mask_blur_radius", 2))
-            w = _carve_blend_weight(pts, c2w, K, m, blur_r)
-            smin = float(getattr(cfg, "mc_carve_sdf_min", 0.35))
-            smin_t = sdf_flat.new_tensor(smin)
+
+        if multi_view_available:
+            # Preferred: carve from all input views (respects visual hull).
+            im = input_masks[0] if input_masks.dim() == 5 else input_masks  # (Nv,1,H,W)
+            ic = input_c2ws[0] if input_c2ws.dim() == 4 else input_c2ws      # (Nv,4,4)
+            ik = input_Ks[0]   if input_Ks.dim() == 4   else input_Ks        # (Nv,3,3)
+            w = _multiview_carve_weight(pts, ic, ik, im, blur_r)
             sdf_pushed = torch.maximum(sdf_flat, smin_t)
-            # Convex blend avoids a single-voxel SDF cliff at the carve boundary.
+            sdf_flat = (1.0 - w) * sdf_flat + w * sdf_pushed
+        elif single_view_available:
+            m = _mask_hw(mask_hw)
+            w = _carve_blend_weight(pts, c2w, K, m, blur_r)
+            sdf_pushed = torch.maximum(sdf_flat, smin_t)
             sdf_flat = (1.0 - w) * sdf_flat + w * sdf_pushed
 
     sdf_grid = sdf_flat.reshape(res, res, res).cpu().numpy()
@@ -184,5 +274,15 @@ def extract_sdf_mesh(
         if len(parts) > 1:
             tm = max(parts, key=lambda x: int(x.faces.shape[0]))
             verts, faces = tm.vertices.astype(np.float32), tm.faces
+
+    n_smooth = int(getattr(cfg, "mc_laplacian_iters", 0))
+    if n_smooth > 0:
+        import trimesh
+        import trimesh.smoothing
+
+        tm_s = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+        trimesh.smoothing.filter_laplacian(tm_s, lamb=0.5, iterations=n_smooth)
+        verts = np.array(tm_s.vertices, dtype=np.float32)
+        faces = tm_s.faces
 
     return verts, faces

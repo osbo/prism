@@ -547,15 +547,14 @@ class OmniObject3DDataset(Dataset):
         while len(view_ids) < n:
             view_ids.append(random.randint(0, n_avail - 1))
 
-        # Build stacked image tensor; collect cameras; extract mask from view 0 (target).
+        # Build stacked image tensor; collect cameras; extract mask from all views.
         img_list:  List[torch.Tensor] = []
         c2w_list:  List[torch.Tensor] = []
         K_list:    List[torch.Tensor] = []
-        mask_np:   Optional[np.ndarray] = None
+        mask_list: List[np.ndarray]   = []
         for i, vid in enumerate(view_ids):
             pil_raw = Image.open(_rgb_path(obj_dir, vid))
-            if i == 0:
-                mask_np = _load_mask(pil_raw)
+            mask_list.append(_load_mask(pil_raw))
             rgb_img = pil_raw.convert("RGB")
             if self.img_resize:
                 rgb_img = self.img_resize(rgb_img)
@@ -571,11 +570,13 @@ class OmniObject3DDataset(Dataset):
         c2w = c2w_list[0]
         K   = K_list[0]
 
-        mask = torch.from_numpy(mask_np).unsqueeze(0)   # (1, H_orig, W_orig)
+        masks_np = np.stack(mask_list, axis=0)           # (N, H_orig, W_orig)
+        input_masks = torch.from_numpy(masks_np).unsqueeze(1)  # (N, 1, H_orig, W_orig)
         if self.img_resize:
-            mask = F.interpolate(mask.unsqueeze(0),
-                                 (self.image_size, self.image_size),
-                                 mode="nearest").squeeze(0)
+            input_masks = F.interpolate(input_masks,
+                                        (self.image_size, self.image_size),
+                                        mode="nearest")
+        mask = input_masks[0]   # (1, H, W) — target view mask (backward compat)
 
         depth_np = np.load(_depth_path(obj_dir, target_view)).astype(np.float32)
         depth = torch.from_numpy(depth_np).unsqueeze(0)
@@ -587,18 +588,19 @@ class OmniObject3DDataset(Dataset):
         mesh_path = str(self.scan_root / cat / obj_id / f"{obj_id}.obj")
 
         return {
-            "images":     images,
-            "input_c2ws": input_c2ws,
-            "input_Ks":   input_Ks,
-            "depth":      depth,
-            "normal":     normal,
-            "mask":       mask,
-            "c2w":        c2w,
-            "K":          K,
-            "category":   cat,
-            "object_id":  obj_id,
-            "view_id":    target_view,
-            "mesh_path":  mesh_path,
+            "images":       images,
+            "input_c2ws":   input_c2ws,
+            "input_Ks":     input_Ks,
+            "input_masks":  input_masks,
+            "depth":        depth,
+            "normal":       normal,
+            "mask":         mask,
+            "c2w":          c2w,
+            "K":            K,
+            "category":     cat,
+            "object_id":    obj_id,
+            "view_id":      target_view,
+            "mesh_path":    mesh_path,
         }
 
     def _getitem_extracted(self, cat: str, obj_id: str) -> dict:
@@ -616,11 +618,11 @@ class OmniObject3DDataset(Dataset):
         while len(view_ids) < n:
             view_ids.append(random.randint(0, n_avail - 1))
 
-        # Build stacked image tensor; collect cameras; extract mask and orig_wh from view 0.
+        # Build stacked image tensor; collect cameras; extract masks from all views.
         img_list:  List[torch.Tensor] = []
         c2w_list:  List[torch.Tensor] = []
         K_list:    List[torch.Tensor] = []
-        mask_np:   Optional[np.ndarray] = None
+        mask_list: List[np.ndarray]   = []
         orig_wh:   Optional[Tuple[int, int]] = None
         K_np_base = _intrinsics_from_angle_x(cam_ax, w0, h0)
         if self.img_resize:
@@ -631,8 +633,8 @@ class OmniObject3DDataset(Dataset):
         for i, vid in enumerate(view_ids):
             fp = frames[vid]["file_path"]
             pil_raw = Image.open(render_dir / "images" / f"{fp}.png")
+            mask_list.append(_load_mask(pil_raw))
             if i == 0:
-                mask_np = _load_mask(pil_raw)
                 orig_wh = (pil_raw.width, pil_raw.height)
             rgb_img = pil_raw.convert("RGB")
             if self.img_resize:
@@ -652,11 +654,13 @@ class OmniObject3DDataset(Dataset):
 
         target_fp = frames[target_view]["file_path"]
 
-        mask = torch.from_numpy(mask_np).unsqueeze(0)   # (1, H_orig, W_orig)
+        masks_np = np.stack(mask_list, axis=0)           # (N, H_orig, W_orig)
+        input_masks = torch.from_numpy(masks_np).unsqueeze(1)  # (N, 1, H_orig, W_orig)
         if self.img_resize:
-            mask = F.interpolate(mask.unsqueeze(0),
-                                 (self.image_size, self.image_size),
-                                 mode="nearest").squeeze(0)
+            input_masks = F.interpolate(input_masks,
+                                        (self.image_size, self.image_size),
+                                        mode="nearest")
+        mask = input_masks[0]   # (1, H, W) — target view mask (backward compat)
 
         depth_np = _load_exr_depth(render_dir / "depths" / f"{target_fp}_depth.exr").astype(np.float32)
         depth = torch.from_numpy(depth_np).unsqueeze(0)
@@ -678,18 +682,19 @@ class OmniObject3DDataset(Dataset):
         mesh_path = str(self.scan_root / obj_id / "Scan" / "Scan.obj")
 
         return {
-            "images":     images,
-            "input_c2ws": input_c2ws,
-            "input_Ks":   input_Ks,
-            "depth":      depth,
-            "normal":     normal,
-            "mask":       mask,
-            "c2w":        c2w,
-            "K":          K,
-            "category":   cat,
-            "object_id":  obj_id,
-            "view_id":    target_view,
-            "mesh_path":  mesh_path,
+            "images":       images,
+            "input_c2ws":   input_c2ws,
+            "input_Ks":     input_Ks,
+            "input_masks":  input_masks,
+            "depth":        depth,
+            "normal":       normal,
+            "mask":         mask,
+            "c2w":          c2w,
+            "K":            K,
+            "category":     cat,
+            "object_id":    obj_id,
+            "view_id":      target_view,
+            "mesh_path":    mesh_path,
         }
 
 

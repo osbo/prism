@@ -63,51 +63,94 @@ class PRISM(nn.Module):
         """
         B, Nv, C, Hf, Wf = feat_maps.shape
         H, W = img_hw
-        device = pts.device
-        out = torch.zeros(pts.shape[0], C, device=device, dtype=pts.dtype)
+        out = torch.zeros(pts.shape[0], C, device=pts.device, dtype=pts.dtype)
+
+        # Keep outer batch loop so we never materialise feat_maps[all_pts, k] at once;
+        # vectorise the inner view loop with a single batched grid_sample per element.
+        for b in range(B):
+            mb = bidx_pts == b
+            if not mb.any():
+                continue
+            pts_b = pts[mb]                    # (N_b, 3)
+            N_b   = pts_b.shape[0]
+
+            R = input_c2ws[b, :, :3, :3]      # (Nv, 3, 3)
+            t = input_c2ws[b, :, :3, 3]       # (Nv, 3)
+            # (Nv, N_b, 3): row-vector w2c per view per point
+            diff = pts_b.unsqueeze(0) - t.unsqueeze(1)       # (Nv, N_b, 3)
+            pc   = torch.einsum("vnk,vkj->vnj", diff, R)     # (Nv, N_b, 3)
+
+            z_c = (-pc[:, :, 2]).clamp(min=1e-4)             # (Nv, N_b)
+            fx  = input_Ks[b, :, 0, 0].unsqueeze(1)          # (Nv, 1)
+            fy  = input_Ks[b, :, 1, 1].unsqueeze(1)
+            cx  = input_Ks[b, :, 0, 2].unsqueeze(1)
+            cy  = input_Ks[b, :, 1, 2].unsqueeze(1)
+            u   = pc[:, :, 0] / z_c * fx + cx                # (Nv, N_b)
+            v   = -pc[:, :, 1] / z_c * fy + cy
+
+            u_n  = u / (W - 1) * 2.0 - 1.0
+            v_n  = v / (H - 1) * 2.0 - 1.0
+            grid = torch.stack([u_n, v_n], dim=-1).unsqueeze(2)   # (Nv, N_b, 1, 2)
+
+            # feat_maps[b]: (Nv, C, Hf, Wf); grid_sample output: (Nv, C, N_b, 1)
+            sampled = F.grid_sample(feat_maps[b], grid, align_corners=True,
+                                    mode="bilinear", padding_mode="zeros")
+            # mean over views → (N_b, C)
+            out[mb] = sampled.squeeze(-1).mean(0).T
+
+        return out   # (N_pts, C)
+
+    def _sample_masks(self, pts, bidx_pts, input_c2ws, input_Ks, input_masks, img_hw):
+        """
+        Project each 3D point into every input view; return per-point minimum mask value.
+        A value < 0.5 means the point projects outside the foreground in at least one view,
+        so it analytically cannot be inside the surface (visual hull constraint).
+
+        input_masks: (B, Nv, 1, Hm, Wm) float in [0, 1]
+        Returns:     (N_pts,) float — min mask value across all views
+        """
+        B, Nv, _, Hm, Wm = input_masks.shape
+        H, W = img_hw
+        min_val = torch.ones(pts.shape[0], device=pts.device, dtype=pts.dtype)
 
         for b in range(B):
             mb = bidx_pts == b
             if not mb.any():
                 continue
-            pts_b = pts[mb]          # (N_b, 3)
+            pts_b = pts[mb]
             N_b   = pts_b.shape[0]
 
-            view_feats = []
-            for k in range(Nv):
-                c2w_k = input_c2ws[b, k]    # (4, 4)
-                K_k   = input_Ks[b, k]      # (3, 3)
+            R = input_c2ws[b, :, :3, :3]      # (Nv, 3, 3)
+            t = input_c2ws[b, :, :3, 3]       # (Nv, 3)
+            diff = pts_b.unsqueeze(0) - t.unsqueeze(1)       # (Nv, N_b, 3)
+            pc   = torch.einsum("vnk,vkj->vnj", diff, R)     # (Nv, N_b, 3)
 
-                # World → camera (c2w is camera-to-world, so w2c: R^T(p - t))
-                R   = c2w_k[:3, :3]
-                t   = c2w_k[:3, 3]
-                pc  = (pts_b - t) @ R       # (N_b, 3)  row-vector convention
+            behind = pc[:, :, 2] > -1e-4                     # (Nv, N_b)
+            z_c = (-pc[:, :, 2]).clamp(min=1e-4)
+            fx  = input_Ks[b, :, 0, 0].unsqueeze(1)
+            fy  = input_Ks[b, :, 1, 1].unsqueeze(1)
+            cx  = input_Ks[b, :, 0, 2].unsqueeze(1)
+            cy  = input_Ks[b, :, 1, 2].unsqueeze(1)
+            u   = pc[:, :, 0] / z_c * fx + cx
+            v   = -pc[:, :, 1] / z_c * fy + cy
 
-                z_c = pc[:, 2].clamp(min=1e-4)
-                u   = pc[:, 0] / z_c * K_k[0, 0] + K_k[0, 2]   # pixel x
-                v   = pc[:, 1] / z_c * K_k[1, 1] + K_k[1, 2]   # pixel y
+            u_n  = u / (W - 1) * 2.0 - 1.0
+            v_n  = v / (H - 1) * 2.0 - 1.0
+            grid = torch.stack([u_n, v_n], dim=-1).unsqueeze(2)   # (Nv, N_b, 1, 2)
 
-                # Normalise to [-1, 1] for grid_sample; out-of-view → zero via padding_mode.
-                u_n = u / (W - 1) * 2.0 - 1.0
-                v_n = v / (H - 1) * 2.0 - 1.0
-                grid = torch.stack([u_n, v_n], dim=-1).reshape(1, 1, N_b, 2)
+            # input_masks[b]: (Nv, 1, Hm, Wm); output: (Nv, 1, N_b, 1)
+            sampled = F.grid_sample(input_masks[b], grid, align_corners=True,
+                                    mode="bilinear", padding_mode="zeros").reshape(Nv, N_b)
+            sampled = torch.where(behind, torch.ones_like(sampled), sampled)
+            min_val[mb] = sampled.min(dim=0).values
 
-                # feat_maps[b, k]: (C, Hf, Wf) → add batch dim → (1, C, Hf, Wf)
-                fm = feat_maps[b, k].unsqueeze(0)
-                # grid_sample output: (1, C, 1, N_b) → (N_b, C)
-                sampled = F.grid_sample(fm, grid, align_corners=True,
-                                        mode="bilinear", padding_mode="zeros")
-                view_feats.append(sampled.squeeze(0).squeeze(1).T)   # (N_b, C)
-
-            out[mb] = torch.stack(view_feats, dim=0).mean(0)
-
-        return out   # (N_pts, C)
+        return min_val   # (N_pts,)
 
     # ------------------------------------------------------------------
     # Training forward
     # ------------------------------------------------------------------
     def forward(self, images, c2w, K, gt_depth, gt_normal, gt_mask=None,
-                input_c2ws=None, input_Ks=None):
+                input_c2ws=None, input_Ks=None, input_masks=None):
         """
         images:      (B, N, 3, H, W) in [0, 1] — N context views
         c2w:         (B, 4, 4)  — target view camera (supervision)
@@ -203,6 +246,24 @@ class PRISM(nn.Module):
 
         sdf_vals = sdf_flat.reshape(Nr, n_total)
         normals  = sdf_grad.reshape(Nr, n_total, 3)
+
+        # ---- Visual hull loss ------------------------------------------
+        # Any sampled point that projects outside the mask in ANY input view
+        # cannot be inside the surface → push SDF positive there.
+        if input_masks is not None and input_c2ws is not None:
+            with torch.no_grad():
+                hull_min = self._sample_masks(
+                    pts_flat.detach(), bidx_pts,
+                    input_c2ws.float(), input_Ks.float(),
+                    input_masks.float(), (H, W),
+                )
+            outside_hull = hull_min < 0.5
+            if outside_hull.any():
+                l_visual_hull = F.softplus(cfg.visual_hull_margin - sdf_flat[outside_hull]).mean()
+            else:
+                l_visual_hull = sdf_flat.sum() * 0.0
+        else:
+            l_visual_hull = sdf_flat.sum() * 0.0
 
         # ---- NeuS weights → depth, normal, surface point ---------------
         weights = neus_weights(sdf_vals, beta_v, t_vals)
@@ -389,6 +450,26 @@ class PRISM(nn.Module):
         gnrm = sdf_grad.norm(dim=-1)
         l_eikonal = ((gnrm.clamp(max=100.0) - 1.0) ** 2).mean()
 
+        # Curvature regularization — Hutchinson trace estimator of the SDF Hessian.
+        # Penalizes large Laplacians, which drives the banding / high-freq oscillation artifacts.
+        # Requires create_graph=True (already set above when self.training).
+        lam_curv = float(getattr(cfg, "lambda_curvature", 0.0))
+        if self.training and lam_curv > 0.0:
+            n_curv = min(int(getattr(cfg, "curvature_n_pts", 512)), pts_flat.shape[0])
+            idx_c  = torch.randperm(pts_flat.shape[0], device=device)[:n_curv]
+            v_c    = torch.randn(n_curv, 3, device=device, dtype=pts_flat.dtype)
+            # Second derivative: H[idx_c] @ v_c via one extra backward through sdf_grad.
+            Hv = torch.autograd.grad(
+                (sdf_grad[idx_c] * v_c).sum(),
+                pts_flat,
+                retain_graph=True,
+                create_graph=False,
+            )[0][idx_c]   # (n_curv, 3)
+            # v^T H v is an unbiased estimator of trace(H) = Laplacian(SDF).
+            l_curvature = (Hv * v_c).sum(-1).pow(2).mean()
+        else:
+            l_curvature = sdf_flat.sum() * 0.0
+
         # Closure prior (lightweight): keep center inside and far boundary outside.
         with autocast("cuda", enabled=False):
             c_pts = torch.zeros(B, 3, device=device, dtype=torch.float32)
@@ -412,6 +493,7 @@ class PRISM(nn.Module):
             + cfg.lambda_depth       * l_depth
             + cfg.lambda_normal      * l_normal
             + cfg.lambda_eik         * l_eikonal
+            + lam_curv               * l_curvature
             + cfg.lambda_sdf_surface * l_sdf_surface
             + cfg.lambda_sdf_sign    * l_sdf_sign
             + cfg.lambda_sdf_band    * l_sdf_band
@@ -419,22 +501,25 @@ class PRISM(nn.Module):
             + cfg.lambda_sil_dice    * l_sil_dice
             + cfg.lambda_light_facing * l_light_facing
             + cfg.lambda_closure     * l_closure
+            + cfg.lambda_visual_hull * l_visual_hull
         )
         return {
-            "total":       total,
-            "render":      l_render.detach(),
-            "bg_sdf":      l_bg_sdf.detach(),
-            "bg_alpha":    l_bg_alpha.detach(),
-            "depth":       l_depth.detach(),
-            "normal":      l_normal.detach(),
-            "eikonal":     l_eikonal.detach(),
-            "sdf_surface": l_sdf_surface.detach(),
-            "sdf_sign":    l_sdf_sign.detach(),
-            "sdf_band":    l_sdf_band.detach(),
-            "sil_bce":     l_sil_bce.detach(),
-            "sil_dice":    l_sil_dice.detach(),
+            "total":        total,
+            "render":       l_render.detach(),
+            "bg_sdf":       l_bg_sdf.detach(),
+            "bg_alpha":     l_bg_alpha.detach(),
+            "depth":        l_depth.detach(),
+            "normal":       l_normal.detach(),
+            "eikonal":      l_eikonal.detach(),
+            "curvature":    l_curvature.detach(),
+            "sdf_surface":  l_sdf_surface.detach(),
+            "sdf_sign":     l_sdf_sign.detach(),
+            "sdf_band":     l_sdf_band.detach(),
+            "sil_bce":      l_sil_bce.detach(),
+            "sil_dice":     l_sil_dice.detach(),
             "light_facing": l_light_facing.detach(),
-            "closure":     l_closure.detach(),
+            "closure":      l_closure.detach(),
+            "visual_hull":  l_visual_hull.detach(),
         }
 
     # ------------------------------------------------------------------
