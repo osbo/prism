@@ -15,7 +15,7 @@ mkdir -p logs
 module load cuda miniforge
 source activate prism
 
-cd "$(dirname "$0")"
+cd "$SLURM_SUBMIT_DIR"
 
 # Add ``--resume`` (or ``--resume /path/to.pt``) to continue; omit for a fresh run (deletes model.pt).
 python train.py

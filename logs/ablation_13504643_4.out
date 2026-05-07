@@ -1,0 +1,2 @@
+Array task 4 → experiment: ablation_no_eikonal
+Extra args: --lambda_eikonal 0.0

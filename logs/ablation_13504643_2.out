@@ -1,0 +1,2 @@
+Array task 2 → experiment: ablation_no_depth
+Extra args: --lambda_depth 0.0

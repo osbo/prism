@@ -1,0 +1,2 @@
+Array task 3 → experiment: ablation_no_normal
+Extra args: --lambda_normal 0.0

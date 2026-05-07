@@ -1,0 +1,90 @@
+{
+  "aggregate": {
+    "n_objects": 5,
+    "fscore_tau": 0.01,
+    "n_eval_pts": 100000,
+    "chamfer_mean": 0.21942665977513948,
+    "chamfer_std": 0.05389164433567967,
+    "fscore_mean": 0.0,
+    "fscore_std": 0.0,
+    "psnr_mean_db": 5.7158525488847705,
+    "psnr_std_db": 0.5593860878265093
+  },
+  "per_object": [
+    {
+      "object_id": "clock_029",
+      "mesh_path": "/home/osbo/orcd/pool/omniobject3d/extracted/raw_scans/clock_029/Scan/Scan.obj",
+      "chamfer": 0.15059638378968618,
+      "fscore": 0.0,
+      "psnr_db": 6.4608214774616926,
+      "psnr_per_view": [
+        7.104605073725121,
+        4.82022303474997,
+        7.470147045236489,
+        6.285495277930626,
+        6.623636955666256
+      ],
+      "elapsed_s": 24.91
+    },
+    {
+      "object_id": "box_084",
+      "mesh_path": "/home/osbo/orcd/pool/omniobject3d/extracted/raw_scans/box_084/Scan/Scan.obj",
+      "chamfer": 0.17735758753279718,
+      "fscore": 0.0,
+      "psnr_db": 4.747060729651276,
+      "psnr_per_view": [
+        5.533666407336055,
+        3.378257116580574,
+        4.580848010638392,
+        4.546058214081436,
+        5.696473899619922
+      ],
+      "elapsed_s": 22.56
+    },
+    {
+      "object_id": "box_076",
+      "mesh_path": "/home/osbo/orcd/pool/omniobject3d/extracted/raw_scans/box_076/Scan/Scan.obj",
+      "chamfer": 0.30727734314331057,
+      "fscore": 0.0,
+      "psnr_db": 5.691899803197072,
+      "psnr_per_view": [
+        8.34033856943536,
+        8.233822795002151,
+        2.6725049459373773,
+        5.622298873618244,
+        3.590533831992227
+      ],
+      "elapsed_s": 97.01
+    },
+    {
+      "object_id": "box_010",
+      "mesh_path": "/home/osbo/orcd/pool/omniobject3d/extracted/raw_scans/box_010/Scan/Scan.obj",
+      "chamfer": 0.22702862874068788,
+      "fscore": 0.0,
+      "psnr_db": 5.980732504606418,
+      "psnr_per_view": [
+        7.062677349351482,
+        5.390326755446335,
+        10.682599956455853,
+        3.0414885088648944,
+        3.7265699529135246
+      ],
+      "elapsed_s": 35.5
+    },
+    {
+      "object_id": "bottle_051",
+      "mesh_path": "/home/osbo/orcd/pool/omniobject3d/extracted/raw_scans/bottle_051/Scan/Scan.obj",
+      "chamfer": 0.23487335566921572,
+      "fscore": 0.0,
+      "psnr_db": 5.698748229507394,
+      "psnr_per_view": [
+        5.379804595639216,
+        7.22384886390209,
+        7.907124607946406,
+        3.7415756275881695,
+        4.241387452461087
+      ],
+      "elapsed_s": 63.04
+    }
+  ]
+}

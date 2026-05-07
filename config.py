@@ -53,7 +53,7 @@ class PRISMConfig:
     #  lambda_visual_hull      hull         Points outside any input-view mask -> positive SDF (carving).
     #  lambda_perceptual       perc         VGG feature L1 on random rendered patch vs GT patch.
     #  lambda_light_facing     lface        Penalize normals with n dot l <= 0 for BRDF gradient flow.
-    lambda_render: float = 0.35
+    lambda_render: float = 0.5
     lambda_depth:  float = 4.0
     lambda_normal: float = 2.5
     lambda_eik:    float = 1.0
@@ -72,7 +72,7 @@ class PRISMConfig:
     lambda_sil_dice:    float = 0.5
     lambda_visual_hull:  float = 1.5
     visual_hull_margin:  float = 0.02  # same scale as bg_sdf_margin
-    lambda_perceptual:    float = 0.5
+    lambda_perceptual:    float = 0.0
     perceptual_patch_size: int = 32    # patch_size^2 extra rays per step
     lambda_light_facing: float = 0.5
     # Temperature for SDF soft-min silhouette logits (smaller = crisper but less stable).
