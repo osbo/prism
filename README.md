@@ -27,16 +27,6 @@ On 19 held-out OmniObject3D objects (6 categories), the full model reports:
 
 Loss-group ablations showed the largest PSNR impact from removing photometric supervision (`-4.48 dB`), followed by depth supervision (`-1.14 dB`), with smaller effects from normal (`-0.23 dB`) and eikonal (`-0.08 dB`) terms.
 
-## Example Figures
-
-Five input views used for `clock_029`:
-
-![clock_029 input views](../Final%20Project%20Report/Screenshot%202026-05-07%20at%208.25.02%E2%80%AFPM.png)
-
-Extracted mesh rendering (`clock_029`):
-
-![clock_029 reconstructed mesh](../Final%20Project%20Report/Screenshot%202026-05-07%20at%208.35.09%E2%80%AFPM.png)
-
 ## Method Overview
 
 1. **Image encoder** (`ResNet-34`): produces shallow feature maps and a global latent code.
