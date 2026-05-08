@@ -1,0 +1,14 @@
+Array task 0 → experiment: ablation_baseline
+Extra args: 
+
+────────────────────────────────────────────────────────
+  Aggregate Results
+────────────────────────────────────────────────────────
+  Objects evaluated : 19
+  Point samples     : 100,000
+  Chamfer ↓         : 0.20939 ± 0.04263
+  F-Score@0.010 ↑   : 0.0000 ± 0.0000
+  PSNR ↑            : 14.31 ± 2.48 dB
+────────────────────────────────────────────────────────
+
+Ablation ablation_baseline done.  Results in experiments/ablation_baseline/

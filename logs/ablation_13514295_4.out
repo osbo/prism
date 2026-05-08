@@ -1,0 +1,14 @@
+Array task 4 → experiment: ablation_no_eikonal
+Extra args: --lambda_eikonal 0.0
+
+────────────────────────────────────────────────────────
+  Aggregate Results
+────────────────────────────────────────────────────────
+  Objects evaluated : 19
+  Point samples     : 100,000
+  Chamfer ↓         : 0.20942 ± 0.04267
+  F-Score@0.010 ↑   : 0.0000 ± 0.0000
+  PSNR ↑            : 14.07 ± 2.39 dB
+────────────────────────────────────────────────────────
+
+Ablation ablation_no_eikonal done.  Results in experiments/ablation_no_eikonal/

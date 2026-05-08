@@ -1,0 +1,154 @@
+17:07:31  INFO  Reduced model: latent=64  sdf_hidden=128  sdf_layers=4
+17:07:31  INFO  Override: lambda_normal = 0.0
+17:07:31  INFO  === TRAINING: ablation_no_normal  (30 epochs) ===
+17:07:31  INFO  Device: cuda
+17:07:32  INFO  Data: train len=333 (333 objects) / val len=18
+17:07:32  INFO  Fresh run: removed stale experiments/ablation_no_normal/model.pt
+17:07:33  INFO  [0/30] step=0  total=16.9221  render=0.2565  perc=0.0000  depth=1.1268  normal=0.9366  eik=0.0000  sdf0=0.4212  sdf_sign=1.4098  sdf_band=1.4059  bg_sdf=0.2091  bg_alpha=0.2800  sil_bce=2.0821  sil_dice=0.6698  hull=0.2141  lface=0.0762  close=0.6699  β=0.250  lr=0.0e+00  —
+17:07:38  INFO  [0/30] step=50  total=10.7327  render=0.2001  perc=0.0000  depth=0.5916  normal=1.4698  eik=0.0006  sdf0=0.3056  sdf_sign=1.4511  sdf_band=1.4013  bg_sdf=0.2518  bg_alpha=0.0995  sil_bce=0.9114  sil_dice=0.5146  hull=0.2587  lface=0.0258  close=0.6565  β=0.245  lr=5.0e-05  86.4ms/step
+17:07:41  WARNING  non-finite grad norm at step 85 — skipping optimizer step
+17:07:43  INFO  [1/30] step=100  total=8.6871  render=0.2562  perc=0.0000  depth=0.5085  normal=1.2608  eik=0.0073  sdf0=0.1928  sdf_sign=1.3010  sdf_band=1.3737  bg_sdf=0.2950  bg_alpha=0.1410  sil_bce=0.4458  sil_dice=0.1804  hull=0.3072  lface=0.0082  close=0.5939  β=0.240  lr=1.0e-04  94.2ms/step
+17:07:43  WARNING  non-finite grad norm at step 109 — skipping optimizer step
+17:07:47  INFO  [1/30] step=150  total=8.8711  render=0.2066  perc=0.0000  depth=0.5792  normal=1.1194  eik=0.0085  sdf0=0.2380  sdf_sign=1.3351  sdf_band=1.3889  bg_sdf=0.2872  bg_alpha=0.1259  sil_bce=0.3830  sil_dice=0.1838  hull=0.2991  lface=0.0523  close=0.6077  β=0.235  lr=1.5e-04  90.0ms/step
+17:07:52  INFO  [2/30] step=200  total=8.6179  render=0.1965  perc=0.0000  depth=0.4619  normal=1.2381  eik=0.0997  sdf0=0.2380  sdf_sign=1.3179  sdf_band=1.3644  bg_sdf=0.2983  bg_alpha=0.2111  sil_bce=0.3756  sil_dice=0.1135  hull=0.3183  lface=0.0917  close=0.6330  β=0.230  lr=2.0e-04  98.2ms/step
+17:07:57  INFO  [3/30] step=250  total=9.0435  render=0.1502  perc=0.0000  depth=0.3065  normal=0.9175  eik=0.0426  sdf0=0.3050  sdf_sign=1.3439  sdf_band=1.3239  bg_sdf=0.2325  bg_alpha=0.0778  sil_bce=0.8635  sil_dice=0.2730  hull=0.2442  lface=0.0795  close=0.6809  β=0.225  lr=2.5e-04  95.7ms/step
+17:07:58  WARNING  non-finite grad norm at step 259 — skipping optimizer step
+17:08:01  INFO  [3/30] step=300  total=5.3662  render=0.2164  perc=0.0000  depth=0.1794  normal=1.3708  eik=0.0252  sdf0=0.1267  sdf_sign=1.3243  sdf_band=1.2598  bg_sdf=0.2102  bg_alpha=0.0565  sil_bce=0.0413  sil_dice=0.0495  hull=0.2253  lface=0.0410  close=0.7336  β=0.220  lr=3.0e-04  89.4ms/step
+17:08:06  INFO  [4/30] step=350  total=7.2366  render=0.2584  perc=0.0000  depth=0.3108  normal=1.0207  eik=0.0560  sdf0=0.1648  sdf_sign=1.3704  sdf_band=1.3118  bg_sdf=0.1647  bg_alpha=0.0266  sil_bce=0.4556  sil_dice=0.1666  hull=0.1820  lface=0.0527  close=0.8469  β=0.215  lr=3.5e-04  96.5ms/step
+17:08:09  WARNING  non-finite grad norm at step 380 — skipping optimizer step
+17:08:10  INFO  [4/30] step=400  total=5.4415  render=0.2345  perc=0.0000  depth=0.1932  normal=1.1783  eik=0.0957  sdf0=0.1800  sdf_sign=1.3806  sdf_band=1.2368  bg_sdf=0.1487  bg_alpha=0.0383  sil_bce=0.0555  sil_dice=0.0265  hull=0.1731  lface=0.0741  close=0.9446  β=0.210  lr=4.0e-04  88.8ms/step
+17:08:13  INFO    Val loss: 7.1826
+17:08:13  INFO    → Best checkpoint saved
+17:08:17  INFO  [5/30] step=450  total=5.5439  render=0.1556  perc=0.0000  depth=0.1222  normal=0.9638  eik=0.0836  sdf0=0.1716  sdf_sign=1.3857  sdf_band=1.2520  bg_sdf=0.1239  bg_alpha=0.0406  sil_bce=0.2107  sil_dice=0.1116  hull=0.1481  lface=0.0743  close=1.0764  β=0.205  lr=4.5e-04  136.1ms/step
+17:08:22  INFO  [6/30] step=500  total=5.1815  render=0.2836  perc=0.0000  depth=0.0901  normal=1.3869  eik=0.0627  sdf0=0.2204  sdf_sign=1.3993  sdf_band=1.1897  bg_sdf=0.1097  bg_alpha=0.0182  sil_bce=0.1503  sil_dice=0.1584  hull=0.1244  lface=0.0167  close=1.1039  β=0.200  lr=5.0e-04  96.3ms/step
+17:08:27  INFO  [6/30] step=550  total=4.6948  render=0.1798  perc=0.0000  depth=0.0697  normal=1.0990  eik=0.0791  sdf0=0.1503  sdf_sign=1.5267  sdf_band=1.1376  bg_sdf=0.1003  bg_alpha=0.0432  sil_bce=0.0602  sil_dice=0.0414  hull=0.1167  lface=0.0762  close=1.2083  β=0.195  lr=5.0e-04  89.5ms/step
+17:08:31  INFO  [7/30] step=600  total=5.1832  render=0.2578  perc=0.0000  depth=0.1440  normal=1.3706  eik=0.0905  sdf0=0.2141  sdf_sign=1.3351  sdf_band=1.1827  bg_sdf=0.1093  bg_alpha=0.0593  sil_bce=0.0667  sil_dice=0.0325  hull=0.1297  lface=0.1814  close=1.1903  β=0.190  lr=5.0e-04  98.9ms/step
+17:08:36  INFO  [7/30] step=650  total=4.6438  render=0.2536  perc=0.0000  depth=0.0797  normal=1.0456  eik=0.0764  sdf0=0.2137  sdf_sign=1.3210  sdf_band=1.1140  bg_sdf=0.1051  bg_alpha=0.0549  sil_bce=0.0348  sil_dice=0.0264  hull=0.1362  lface=0.0980  close=1.1152  β=0.185  lr=4.9e-04  87.0ms/step
+17:08:41  INFO  [8/30] step=700  total=5.2785  render=0.1913  perc=0.0000  depth=0.1910  normal=0.8741  eik=0.0754  sdf0=0.1861  sdf_sign=1.4282  sdf_band=1.2263  bg_sdf=0.0936  bg_alpha=0.0497  sil_bce=0.0517  sil_dice=0.0281  hull=0.1252  lface=0.0955  close=1.2647  β=0.180  lr=4.9e-04  95.5ms/step
+17:08:45  INFO  [9/30] step=750  total=5.7535  render=0.1891  perc=0.0000  depth=0.1946  normal=0.9399  eik=0.0800  sdf0=0.2440  sdf_sign=1.4049  sdf_band=1.2000  bg_sdf=0.1077  bg_alpha=0.0554  sil_bce=0.1602  sil_dice=0.1233  hull=0.1290  lface=0.0689  close=1.1209  β=0.175  lr=4.8e-04  95.7ms/step
+17:08:50  INFO  [9/30] step=800  total=5.0397  render=0.2312  perc=0.0000  depth=0.1939  normal=1.3001  eik=0.1023  sdf0=0.1264  sdf_sign=1.1950  sdf_band=1.2439  bg_sdf=0.1047  bg_alpha=0.0641  sil_bce=0.0527  sil_dice=0.0747  hull=0.1181  lface=0.0208  close=1.1997  β=0.170  lr=4.7e-04  89.5ms/step
+17:08:53  INFO    Val loss: 5.3835
+17:08:54  INFO    → Best checkpoint saved
+17:08:56  INFO  [10/30] step=850  total=4.9682  render=0.1910  perc=0.0000  depth=0.1375  normal=1.1630  eik=0.0722  sdf0=0.1453  sdf_sign=1.5392  sdf_band=1.1987  bg_sdf=0.0966  bg_alpha=0.0336  sil_bce=0.0359  sil_dice=0.0461  hull=0.1102  lface=0.1082  close=1.2406  β=0.165  lr=4.6e-04  129.9ms/step
+17:09:01  INFO  [10/30] step=900  total=5.1413  render=0.2053  perc=0.0000  depth=0.1851  normal=0.9311  eik=0.0738  sdf0=0.1046  sdf_sign=1.4326  sdf_band=1.2580  bg_sdf=0.0987  bg_alpha=0.0360  sil_bce=0.0500  sil_dice=0.0491  hull=0.1243  lface=0.1063  close=1.2132  β=0.160  lr=4.5e-04  85.2ms/step
+17:09:06  INFO  [11/30] step=950  total=5.0580  render=0.2085  perc=0.0000  depth=0.1604  normal=1.1287  eik=0.0705  sdf0=0.1360  sdf_sign=1.3990  sdf_band=1.2453  bg_sdf=0.1130  bg_alpha=0.0489  sil_bce=0.0337  sil_dice=0.0278  hull=0.1261  lface=0.1258  close=1.1406  β=0.155  lr=4.4e-04  98.8ms/step
+17:09:11  INFO  [12/30] step=1000  total=4.7177  render=0.1722  perc=0.0000  depth=0.1074  normal=1.3103  eik=0.0885  sdf0=0.1102  sdf_sign=1.3388  sdf_band=1.2547  bg_sdf=0.0886  bg_alpha=0.0393  sil_bce=0.0574  sil_dice=0.0292  hull=0.1182  lface=0.0808  close=1.1699  β=0.150  lr=4.3e-04  99.9ms/step
+17:09:15  INFO  [12/30] step=1050  total=4.8510  render=0.2189  perc=0.0000  depth=0.1173  normal=1.0619  eik=0.0708  sdf0=0.1203  sdf_sign=1.4273  sdf_band=1.2310  bg_sdf=0.1013  bg_alpha=0.0530  sil_bce=0.0370  sil_dice=0.0345  hull=0.1205  lface=0.1170  close=1.1380  β=0.145  lr=4.1e-04  88.2ms/step
+17:09:20  INFO  [13/30] step=1100  total=5.0238  render=0.2868  perc=0.0000  depth=0.1589  normal=0.7776  eik=0.0552  sdf0=0.1111  sdf_sign=1.4328  sdf_band=1.2721  bg_sdf=0.1027  bg_alpha=0.0411  sil_bce=0.0210  sil_dice=0.0164  hull=0.1368  lface=0.1035  close=1.0721  β=0.140  lr=4.0e-04  96.4ms/step
+17:09:24  INFO  [13/30] step=1150  total=5.1311  render=0.1666  perc=0.0000  depth=0.2416  normal=1.1719  eik=0.0888  sdf0=0.1002  sdf_sign=1.4043  sdf_band=1.2327  bg_sdf=0.0877  bg_alpha=0.0254  sil_bce=0.0283  sil_dice=0.0221  hull=0.1187  lface=0.0550  close=1.1234  β=0.135  lr=3.8e-04  87.0ms/step
+17:09:29  INFO  [14/30] step=1200  total=4.9341  render=0.1608  perc=0.0000  depth=0.1717  normal=1.0563  eik=0.0954  sdf0=0.1435  sdf_sign=1.3278  sdf_band=1.2222  bg_sdf=0.0896  bg_alpha=0.0313  sil_bce=0.0444  sil_dice=0.0350  hull=0.1195  lface=0.0810  close=1.1280  β=0.130  lr=3.6e-04  99.5ms/step
+17:09:34  INFO    Val loss: 4.8446
+17:09:34  INFO    → Best checkpoint saved
+17:09:36  INFO  [15/30] step=1250  total=4.6525  render=0.2269  perc=0.0000  depth=0.1119  normal=1.4711  eik=0.0819  sdf0=0.1378  sdf_sign=1.3202  sdf_band=1.2139  bg_sdf=0.0899  bg_alpha=0.0345  sil_bce=0.0396  sil_dice=0.0297  hull=0.1211  lface=0.0352  close=1.1145  β=0.124  lr=3.5e-04  129.9ms/step
+17:09:40  INFO  [15/30] step=1300  total=4.4549  render=0.2011  perc=0.0000  depth=0.0877  normal=1.3264  eik=0.0838  sdf0=0.1202  sdf_sign=1.3876  sdf_band=1.1880  bg_sdf=0.0895  bg_alpha=0.0185  sil_bce=0.0260  sil_dice=0.0348  hull=0.1059  lface=0.0576  close=1.0690  β=0.119  lr=3.3e-04  88.4ms/step
+17:09:45  INFO  [16/30] step=1350  total=5.9261  render=0.2722  perc=0.0000  depth=0.3029  normal=1.0579  eik=0.1452  sdf0=0.1287  sdf_sign=1.3173  sdf_band=1.3142  bg_sdf=0.1040  bg_alpha=0.0454  sil_bce=0.1051  sil_dice=0.0683  hull=0.1275  lface=0.0750  close=1.0104  β=0.114  lr=3.1e-04  97.3ms/step
+17:09:49  INFO  [16/30] step=1400  total=5.0772  render=0.2363  perc=0.0000  depth=0.1600  normal=1.6063  eik=0.0822  sdf0=0.1933  sdf_sign=1.4260  sdf_band=1.1598  bg_sdf=0.0932  bg_alpha=0.0338  sil_bce=0.0564  sil_dice=0.0322  hull=0.1185  lface=0.1140  close=1.0442  β=0.109  lr=2.9e-04  85.5ms/step
+17:09:54  INFO  [17/30] step=1450  total=4.5767  render=0.3114  perc=0.0000  depth=0.1182  normal=1.0214  eik=0.0952  sdf0=0.1022  sdf_sign=1.2244  sdf_band=1.2567  bg_sdf=0.0743  bg_alpha=0.0253  sil_bce=0.0424  sil_dice=0.0367  hull=0.1058  lface=0.0501  close=1.0820  β=0.104  lr=2.7e-04  98.5ms/step
+17:09:59  INFO  [18/30] step=1500  total=4.9845  render=0.2039  perc=0.0000  depth=0.1587  normal=1.2850  eik=0.0902  sdf0=0.0857  sdf_sign=1.3794  sdf_band=1.2881  bg_sdf=0.0861  bg_alpha=0.0311  sil_bce=0.0631  sil_dice=0.0757  hull=0.1100  lface=0.0731  close=1.1828  β=0.099  lr=2.5e-04  97.7ms/step
+17:10:03  INFO  [18/30] step=1550  total=4.4369  render=0.1644  perc=0.0000  depth=0.0701  normal=0.9149  eik=0.1135  sdf0=0.0915  sdf_sign=1.4019  sdf_band=1.2441  bg_sdf=0.0843  bg_alpha=0.0189  sil_bce=0.0216  sil_dice=0.0263  hull=0.1142  lface=0.0868  close=1.0892  β=0.094  lr=2.3e-04  89.1ms/step
+17:10:08  INFO  [19/30] step=1600  total=4.2891  render=0.1060  perc=0.0000  depth=0.0607  normal=1.1389  eik=0.1060  sdf0=0.1251  sdf_sign=1.2946  sdf_band=1.1852  bg_sdf=0.0908  bg_alpha=0.0246  sil_bce=0.0319  sil_dice=0.0251  hull=0.1197  lface=0.0698  close=1.0641  β=0.089  lr=2.1e-04  97.6ms/step
+17:10:13  INFO  [19/30] step=1650  total=5.6407  render=0.1919  perc=0.0000  depth=0.3456  normal=0.9446  eik=0.1383  sdf0=0.0929  sdf_sign=1.3477  sdf_band=1.2781  bg_sdf=0.0966  bg_alpha=0.0254  sil_bce=0.0255  sil_dice=0.0216  hull=0.1263  lface=0.0845  close=1.0395  β=0.084  lr=1.9e-04  87.5ms/step
+17:10:14  INFO    Val loss: 4.5209
+17:10:15  INFO    → Best checkpoint saved
+17:10:19  INFO  [20/30] step=1700  total=5.8034  render=0.1861  perc=0.0000  depth=0.2986  normal=1.5476  eik=0.1529  sdf0=0.1603  sdf_sign=1.3979  sdf_band=1.2660  bg_sdf=0.1098  bg_alpha=0.0535  sil_bce=0.0548  sil_dice=0.0494  hull=0.1275  lface=0.0562  close=1.0609  β=0.079  lr=1.7e-04  130.7ms/step
+17:10:24  INFO  [21/30] step=1750  total=4.9864  render=0.1772  perc=0.0000  depth=0.1658  normal=1.1093  eik=0.1603  sdf0=0.1071  sdf_sign=1.3436  sdf_band=1.2617  bg_sdf=0.0847  bg_alpha=0.0267  sil_bce=0.0548  sil_dice=0.0492  hull=0.1149  lface=0.0570  close=1.0988  β=0.074  lr=1.6e-04  96.9ms/step
+17:10:28  INFO  [21/30] step=1800  total=4.8136  render=0.1585  perc=0.0000  depth=0.1673  normal=1.1981  eik=0.1274  sdf0=0.1231  sdf_sign=1.2417  sdf_band=1.2189  bg_sdf=0.0938  bg_alpha=0.0272  sil_bce=0.0442  sil_dice=0.0473  hull=0.1215  lface=0.0611  close=1.0483  β=0.069  lr=1.4e-04  88.2ms/step
+17:10:33  INFO  [22/30] step=1850  total=4.3109  render=0.2183  perc=0.0000  depth=0.0740  normal=1.3682  eik=0.1622  sdf0=0.0990  sdf_sign=1.2029  sdf_band=1.2385  bg_sdf=0.0828  bg_alpha=0.0152  sil_bce=0.0176  sil_dice=0.0298  hull=0.1120  lface=0.0840  close=1.1072  β=0.064  lr=1.2e-04  98.5ms/step
+17:10:38  INFO  [22/30] step=1900  total=4.9992  render=0.2505  perc=0.0000  depth=0.1515  normal=0.9553  eik=0.1643  sdf0=0.1004  sdf_sign=1.3563  sdf_band=1.2746  bg_sdf=0.1035  bg_alpha=0.0322  sil_bce=0.0271  sil_dice=0.0304  hull=0.1308  lface=0.1203  close=1.0382  β=0.059  lr=1.0e-04  87.2ms/step
+17:10:43  INFO  [23/30] step=1950  total=5.2729  render=0.1588  perc=0.0000  depth=0.1342  normal=1.1684  eik=0.1704  sdf0=0.1983  sdf_sign=1.2643  sdf_band=1.2062  bg_sdf=0.0936  bg_alpha=0.0201  sil_bce=0.1600  sil_dice=0.1210  hull=0.1289  lface=0.0887  close=1.0564  β=0.054  lr=9.0e-05  98.9ms/step
+17:10:48  INFO  [24/30] step=2000  total=5.0927  render=0.1490  perc=0.0000  depth=0.1389  normal=1.3706  eik=0.1595  sdf0=0.0983  sdf_sign=1.4930  sdf_band=1.2759  bg_sdf=0.0952  bg_alpha=0.0222  sil_bce=0.0550  sil_dice=0.1091  hull=0.1107  lface=0.1367  close=1.1082  β=0.049  lr=7.5e-05  96.1ms/step
+17:10:52  INFO  [24/30] step=2050  total=4.8138  render=0.2553  perc=0.0000  depth=0.1356  normal=1.3673  eik=0.1252  sdf0=0.1517  sdf_sign=1.3410  sdf_band=1.1911  bg_sdf=0.0950  bg_alpha=0.0198  sil_bce=0.0351  sil_dice=0.0484  hull=0.1209  lface=0.0723  close=1.0783  β=0.044  lr=6.2e-05  88.8ms/step
+17:10:55  INFO    Val loss: 4.4408
+17:10:55  INFO    → Best checkpoint saved
+17:10:58  INFO  [25/30] step=2100  total=4.9002  render=0.2019  perc=0.0000  depth=0.1203  normal=1.1802  eik=0.1598  sdf0=0.1576  sdf_sign=1.3638  sdf_band=1.2358  bg_sdf=0.0943  bg_alpha=0.0139  sil_bce=0.0453  sil_dice=0.0629  hull=0.1189  lface=0.1053  close=1.0803  β=0.039  lr=5.0e-05  127.9ms/step
+17:11:03  INFO  [25/30] step=2150  total=4.6455  render=0.1547  perc=0.0000  depth=0.1052  normal=1.1674  eik=0.1894  sdf0=0.1462  sdf_sign=1.2461  sdf_band=1.1989  bg_sdf=0.0964  bg_alpha=0.0340  sil_bce=0.0335  sil_dice=0.0350  hull=0.1227  lface=0.0958  close=1.0468  β=0.034  lr=4.0e-05  85.2ms/step
+17:11:07  INFO  [26/30] step=2200  total=4.7750  render=0.2737  perc=0.0000  depth=0.1080  normal=1.0942  eik=0.1588  sdf0=0.0748  sdf_sign=1.4429  sdf_band=1.2574  bg_sdf=0.0945  bg_alpha=0.0184  sil_bce=0.0243  sil_dice=0.0355  hull=0.1245  lface=0.1102  close=1.0478  β=0.029  lr=3.0e-05  96.9ms/step
+17:11:12  INFO  [27/30] step=2250  total=5.2232  render=0.2077  perc=0.0000  depth=0.2724  normal=1.1695  eik=0.1991  sdf0=0.1062  sdf_sign=1.1882  sdf_band=1.2825  bg_sdf=0.0841  bg_alpha=0.0092  sil_bce=0.0269  sil_dice=0.0268  hull=0.1277  lface=0.0478  close=1.0405  β=0.024  lr=2.3e-05  95.0ms/step
+17:11:17  INFO  [27/30] step=2300  total=4.4932  render=0.1516  perc=0.0000  depth=0.1297  normal=1.2828  eik=0.1816  sdf0=0.0916  sdf_sign=1.1975  sdf_band=1.2292  bg_sdf=0.0847  bg_alpha=0.0190  sil_bce=0.0221  sil_dice=0.0400  hull=0.1044  lface=0.0626  close=1.1091  β=0.019  lr=1.6e-05  88.3ms/step
+17:11:22  INFO  [28/30] step=2350  total=4.5360  render=0.1599  perc=0.0000  depth=0.1026  normal=1.2531  eik=0.1980  sdf0=0.0945  sdf_sign=1.2613  sdf_band=1.2132  bg_sdf=0.0930  bg_alpha=0.0197  sil_bce=0.0322  sil_dice=0.0336  hull=0.1240  lface=0.0847  close=1.0491  β=0.014  lr=1.1e-05  97.9ms/step
+17:11:26  INFO  [28/30] step=2400  total=4.3703  render=0.2414  perc=0.0000  depth=0.0948  normal=1.2713  eik=0.2125  sdf0=0.1298  sdf_sign=1.1153  sdf_band=1.1987  bg_sdf=0.0833  bg_alpha=0.0120  sil_bce=0.0195  sil_dice=0.0188  hull=0.1163  lface=0.0834  close=1.0320  β=0.009  lr=7.5e-06  84.7ms/step
+17:11:31  INFO  [29/30] step=2450  total=4.7868  render=0.2370  perc=0.0000  depth=0.1445  normal=1.2741  eik=0.2168  sdf0=0.0775  sdf_sign=1.2840  sdf_band=1.2745  bg_sdf=0.0917  bg_alpha=0.0079  sil_bce=0.0280  sil_dice=0.0399  hull=0.1105  lface=0.0858  close=1.0598  β=0.004  lr=5.5e-06  96.8ms/step
+17:11:35  INFO    Val loss: 4.8480
+17:11:35  INFO  === EVALUATING: ablation_no_normal ===
+17:11:36  INFO  Evaluating 19 test objects → experiments/ablation_no_normal/metrics
+17:11:36  INFO  [1/19]  clock_029
+17:11:52  INFO    Chamfer ↓ 0.15030   F-Score@0.010 ↑ 0.0000
+17:11:57  INFO    PSNR ↑ 12.63 dB  (mean over 5 views)
+17:11:57  INFO  [2/19]  box_084
+17:12:13  INFO    Chamfer ↓ 0.17763   F-Score@0.010 ↑ 0.0000
+17:12:18  INFO    PSNR ↑ 14.77 dB  (mean over 5 views)
+17:12:18  INFO  [3/19]  box_076
+17:13:48  INFO    Chamfer ↓ 0.30723   F-Score@0.010 ↑ 0.0000
+17:13:53  INFO    PSNR ↑ 12.75 dB  (mean over 5 views)
+17:13:53  INFO  [4/19]  box_010
+17:14:22  INFO    Chamfer ↓ 0.22737   F-Score@0.010 ↑ 0.0000
+17:14:26  INFO    PSNR ↑ 11.42 dB  (mean over 5 views)
+17:14:27  INFO  [5/19]  bottle_051
+17:15:23  INFO    Chamfer ↓ 0.23500   F-Score@0.010 ↑ 0.0000
+17:15:27  INFO    PSNR ↑ 13.47 dB  (mean over 5 views)
+17:15:27  INFO  [6/19]  bottle_052
+17:16:30  INFO    Chamfer ↓ 0.23771   F-Score@0.010 ↑ 0.0000
+17:16:34  INFO    PSNR ↑ 13.60 dB  (mean over 5 views)
+17:16:35  INFO  [7/19]  chess_022
+17:17:02  INFO    Chamfer ↓ 0.19983   F-Score@0.010 ↑ 0.0000
+17:17:06  INFO    PSNR ↑ 13.26 dB  (mean over 5 views)
+17:17:06  INFO  [8/19]  cup_013
+17:17:23  INFO    Chamfer ↓ 0.13248   F-Score@0.010 ↑ 0.0000
+17:17:27  INFO    PSNR ↑ 15.14 dB  (mean over 5 views)
+17:17:28  INFO  [9/19]  box_007
+17:18:05  INFO    Chamfer ↓ 0.27566   F-Score@0.010 ↑ 0.0000
+17:18:10  INFO    PSNR ↑ 16.50 dB  (mean over 5 views)
+17:18:10  INFO  [10/19]  clock_050
+17:18:35  INFO    Chamfer ↓ 0.18242   F-Score@0.010 ↑ 0.0000
+17:18:39  INFO    PSNR ↑ 13.15 dB  (mean over 5 views)
+17:18:40  INFO  [11/19]  dumbbell_002
+17:18:56  INFO    Chamfer ↓ 0.19909   F-Score@0.010 ↑ 0.0000
+17:19:01  INFO    PSNR ↑ 19.41 dB  (mean over 5 views)
+17:19:01  INFO  [12/19]  box_015
+17:19:35  INFO    Chamfer ↓ 0.24890   F-Score@0.010 ↑ 0.0000
+17:19:40  INFO    PSNR ↑ 15.68 dB  (mean over 5 views)
+17:19:40  INFO  [13/19]  box_036
+17:20:29  INFO    Chamfer ↓ 0.23734   F-Score@0.010 ↑ 0.0000
+17:20:33  INFO    PSNR ↑ 12.95 dB  (mean over 5 views)
+17:20:33  INFO  [14/19]  box_079
+17:20:50  INFO    Chamfer ↓ 0.16581   F-Score@0.010 ↑ 0.0000
+17:20:54  INFO    PSNR ↑ 9.11 dB  (mean over 5 views)
+17:20:55  INFO  [15/19]  box_090
+17:21:14  INFO    Chamfer ↓ 0.17815   F-Score@0.010 ↑ 0.0000
+17:21:19  INFO    PSNR ↑ 10.31 dB  (mean over 5 views)
+17:21:19  INFO  [16/19]  box_105
+17:21:37  INFO    Chamfer ↓ 0.20289   F-Score@0.010 ↑ 0.0000
+17:21:41  INFO    PSNR ↑ 12.73 dB  (mean over 5 views)
+17:21:41  INFO  [17/19]  bottle_048
+17:22:19  INFO    Chamfer ↓ 0.20797   F-Score@0.010 ↑ 0.0000
+17:22:24  INFO    PSNR ↑ 20.08 dB  (mean over 5 views)
+17:22:24  INFO  [18/19]  box_020
+17:22:30  INFO    Chamfer ↓ 0.17330   F-Score@0.010 ↑ 0.0000
+17:22:34  INFO    PSNR ↑ 13.93 dB  (mean over 5 views)
+17:22:35  INFO  [19/19]  cup_038
+17:23:39  INFO    Chamfer ↓ 0.23990   F-Score@0.010 ↑ 0.0000
+17:23:43  INFO    PSNR ↑ 15.00 dB  (mean over 5 views)
+17:23:43  INFO  Saved → experiments/ablation_no_normal/metrics/metrics.json
+17:23:43  INFO  === VISUALIZING: ablation_no_normal ===
+17:23:43  INFO  Rendering 19 test objects → experiments/ablation_no_normal/visuals
+17:23:44  INFO  Rendering clock_029 (5 views) …
+17:23:48  INFO    saved experiments/ablation_no_normal/visuals/clock_029.png
+17:23:48  INFO  Rendering box_084 (5 views) …
+17:23:53  INFO    saved experiments/ablation_no_normal/visuals/box_084.png
+17:23:54  INFO  Rendering box_076 (5 views) …
+17:23:58  INFO    saved experiments/ablation_no_normal/visuals/box_076.png
+17:23:59  INFO  Rendering box_010 (5 views) …
+17:24:03  INFO    saved experiments/ablation_no_normal/visuals/box_010.png
+17:24:04  INFO  Rendering bottle_051 (5 views) …
+17:24:08  INFO    saved experiments/ablation_no_normal/visuals/bottle_051.png
+17:24:09  INFO  Rendering bottle_052 (5 views) …
+17:24:13  INFO    saved experiments/ablation_no_normal/visuals/bottle_052.png
+17:24:14  INFO  Rendering chess_022 (5 views) …
+17:24:18  INFO    saved experiments/ablation_no_normal/visuals/chess_022.png
+17:24:18  INFO  Rendering cup_013 (5 views) …
+17:24:23  INFO    saved experiments/ablation_no_normal/visuals/cup_013.png
+17:24:23  INFO  Rendering box_007 (5 views) …
+17:24:28  INFO    saved experiments/ablation_no_normal/visuals/box_007.png
+17:24:28  INFO  Rendering clock_050 (5 views) …
+17:24:33  INFO    saved experiments/ablation_no_normal/visuals/clock_050.png
+17:24:33  INFO  === DONE: ablation_no_normal ===  Results in experiments/ablation_no_normal/

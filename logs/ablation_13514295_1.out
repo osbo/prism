@@ -1,0 +1,14 @@
+Array task 1 → experiment: ablation_no_photometric
+Extra args: --lambda_render 0.0 --lambda_perceptual 0.0
+
+────────────────────────────────────────────────────────
+  Aggregate Results
+────────────────────────────────────────────────────────
+  Objects evaluated : 19
+  Point samples     : 100,000
+  Chamfer ↓         : 0.20946 ± 0.04270
+  F-Score@0.010 ↑   : 0.0000 ± 0.0000
+  PSNR ↑            : 11.18 ± 2.96 dB
+────────────────────────────────────────────────────────
+
+Ablation ablation_no_photometric done.  Results in experiments/ablation_no_photometric/

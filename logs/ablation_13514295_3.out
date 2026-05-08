@@ -1,0 +1,14 @@
+Array task 3 → experiment: ablation_no_normal
+Extra args: --lambda_normal 0.0
+
+────────────────────────────────────────────────────────
+  Aggregate Results
+────────────────────────────────────────────────────────
+  Objects evaluated : 19
+  Point samples     : 100,000
+  Chamfer ↓         : 0.20942 ± 0.04266
+  F-Score@0.010 ↑   : 0.0000 ± 0.0000
+  PSNR ↑            : 13.99 ± 2.62 dB
+────────────────────────────────────────────────────────
+
+Ablation ablation_no_normal done.  Results in experiments/ablation_no_normal/
